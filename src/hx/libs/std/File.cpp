@@ -350,9 +350,9 @@ String _hx_std_file_contents_string( String name )
 
 /**
    file_contents : f:string -> string
-   <doc>Read the content of the file [f] and return it.</doc>
+   <doc>Read the content of the file [f] with a start position [pos] and end position [len], and return it.</doc>
 **/
-Array<unsigned char> _hx_std_file_contents_bytes( String name )
+Array<unsigned char> _hx_std_file_contents_bytes( String name, int pos, int len )
 {
    hx::strbuf buf;
 #ifdef NEKO_WINDOWS
@@ -366,24 +366,29 @@ Array<unsigned char> _hx_std_file_contents_bytes( String name )
       file_error("file_contents",name);
 
    fseek(file,0,SEEK_END);
-   int len = ftell(file);
-   if (len<0)
+   int size = ftell(file);
+   if (size<0)
       file_error("file_ftell",name);
 
-   fseek(file,0,SEEK_SET);
+   if (len != 0)
+   {
+      size = len;
+   }
+
+   fseek(file,pos,SEEK_SET);
    hx::ExitGCFreeZone();
 
-   Array<unsigned char> buffer = Array_obj<unsigned char>::__new(len,len);
+   Array<unsigned char> buffer = Array_obj<unsigned char>::__new(size,size);
    hx::EnterGCFreeZone();
    if (len)
    {
       char *dest = (char *)&buffer[0];
 
       int p = 0;
-      while( len > 0 )
+      while( size > 0 )
       {
          POSIX_LABEL(file_contents1);
-         int d = (int)fread(dest + p,1,len,file);
+         int d = (int)fread(dest + p,1,size,file);
          if( d <= 0 )
          {
             HANDLE_FINTR(file,file_contents1);
@@ -391,7 +396,7 @@ Array<unsigned char> _hx_std_file_contents_bytes( String name )
             file_error("file_contents",name);
          }
          p += d;
-         len -= d;
+         size -= d;
       }
    }
    fclose(file);
