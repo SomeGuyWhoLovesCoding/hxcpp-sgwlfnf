@@ -3873,11 +3873,11 @@ void Profiler::ReportTopology()
     }
 
     DWORD dsz = 0;
-    _GetLogicalProcessorInformationEx( RelationProcessorDie, nullptr, &dsz );
+    _GetLogicalProcessorInformationEx( static_cast<LOGICAL_PROCESSOR_RELATIONSHIP>(5), nullptr, &dsz );
     if( GetLastError() == ERROR_INSUFFICIENT_BUFFER )
     {
         dieInfo = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX*)tracy_malloc( dsz );
-        auto res = _GetLogicalProcessorInformationEx( RelationProcessorDie, dieInfo, &dsz );
+        auto res = _GetLogicalProcessorInformationEx( static_cast<LOGICAL_PROCESSOR_RELATIONSHIP>(5), dieInfo, &dsz );
         assert( res );
     }
     else
@@ -3928,7 +3928,7 @@ void Profiler::ReportTopology()
     ptr = dieInfo;
     while( (char*)ptr < ((char*)dieInfo) + dsz )
     {
-        assert( ptr->Relationship == RelationProcessorDie );
+        assert( ptr->Relationship == static_cast<LOGICAL_PROCESSOR_RELATIONSHIP>(5) );
         // FIXME account for GroupCount
         auto mask = ptr->Processor.GroupMask[0].Mask;
         int core = 0;

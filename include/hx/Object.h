@@ -5,8 +5,6 @@
 #error "Please include hxcpp.h, not hx/Object.h"
 #endif
 
-
-
 // --- Constants -------------------------------------------------------
 
 // These values are returned from the "__GetType" function
@@ -27,11 +25,8 @@ enum hxObjectType
    vtAbstractBase = 0x100,
 };
 
-
 namespace hx
 {
-
-
 
 class FieldRef;
 class IndexRef;
@@ -55,7 +50,6 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES null BadCast();
 #ifndef CPPIA_CALL
    #define CPPIA_CALL
 #endif
-
 
 typedef void (CPPIA_CALL *StackExecute)(struct StackContext *ctx);
 struct ScriptFunction
@@ -143,7 +137,6 @@ enum
 
 };
 
-
 // --- hx::Object ------------------------------------------------------------
 //
 // Base for all hxcpp objects.
@@ -156,7 +149,6 @@ class HXCPP_EXTERN_CLASS_ATTRIBUTES Object
 {
 public:
    enum { _hx_ClassId = hx::clsIdDynamic };
-
 
    inline void *operator new( size_t inSize, bool inContainer=true, const char *inName=0 )
    {
@@ -208,7 +200,6 @@ public:
    virtual int __GetType() const { return vtClass; }
    virtual void *__GetHandle() const { return 0; }
 
-
    virtual hx::FieldRef __FieldRef(const String &inString);
 
    virtual String __ToString() const;
@@ -239,7 +230,6 @@ public:
    virtual int __length() const { return 0; }
    virtual Dynamic __GetItem(int inIndex) const;
    virtual Dynamic __SetItem(int inIndex,Dynamic inValue);
-
 
    typedef const Dynamic &D;
    virtual Dynamic __run();
@@ -309,7 +299,6 @@ public:
       if (!SetPtr(inObjectPtr.mPtr))
          CastPtr(inObjectPtr.mPtr,false);
    }
-
 
    inline ObjectPtr(const ::cpp::Variant &inVariant)
    {
@@ -390,7 +379,6 @@ public:
    //inline bool operator==(const Dynamic &inRHS) const { return inRHS==*this; }
    //inline bool operator!=(const Dynamic &inRHS) const { return inRHS!=*this; }
 
-
    // This is defined in the "FieldRef" class...
    inline class hx::FieldRef FieldRef(const String &inString);
    inline class hx::IndexRef IndexRef(int inString);
@@ -399,9 +387,6 @@ public:
    OBJ_ *mPtr;
 };
 
-
 } // end namespace hx
-
-
 
 #endif

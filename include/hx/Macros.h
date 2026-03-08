@@ -986,46 +986,46 @@ static ::Dynamic __##class##func(const Array< ::Dynamic> &inArgs) \
 
 // For compatibility until next version of haxe is released
 #define HX_BEGIN_LOCAL_FUNC0(name) \
-      HX_BEGIN_LOCAL_FUNC_S0( ::hx::LocalFunc,name)
+      HX_BEGIN_LOCAL_FUNC_S0( ::hx::VariadicLocalFunc,name)
 
 #define HX_BEGIN_LOCAL_FUNC1(name,t0,v0) \
-      HX_BEGIN_LOCAL_FUNC_S1( ::hx::LocalFunc,name,t0,v0)
+      HX_BEGIN_LOCAL_FUNC_S1( ::hx::VariadicLocalFunc,name,t0,v0)
 #define HX_BEGIN_LOCAL_FUNC2(name,t0,v0,t1,v1) \
-      HX_BEGIN_LOCAL_FUNC_S2( ::hx::LocalFunc,name,t0,v0,t1,v1)
+      HX_BEGIN_LOCAL_FUNC_S2( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1)
 #define HX_BEGIN_LOCAL_FUNC3(name,t0,v0,t1,v1,t2,v2) \
-      HX_BEGIN_LOCAL_FUNC_S3( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2)
+      HX_BEGIN_LOCAL_FUNC_S3( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2)
 #define HX_BEGIN_LOCAL_FUNC4(name,t0,v0,t1,v1,t2,v2,t3,v3) \
-      HX_BEGIN_LOCAL_FUNC_S4( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3)
+      HX_BEGIN_LOCAL_FUNC_S4( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3)
 #define HX_BEGIN_LOCAL_FUNC5(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4) \
-      HX_BEGIN_LOCAL_FUNC_S5( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4)
+      HX_BEGIN_LOCAL_FUNC_S5( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4)
 #define HX_BEGIN_LOCAL_FUNC6(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5) \
-      HX_BEGIN_LOCAL_FUNC_S6( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5)
+      HX_BEGIN_LOCAL_FUNC_S6( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5)
 #define HX_BEGIN_LOCAL_FUNC7(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6) \
-      HX_BEGIN_LOCAL_FUNC_S7( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6)
+      HX_BEGIN_LOCAL_FUNC_S7( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6)
 #define HX_BEGIN_LOCAL_FUNC8(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7) \
-      HX_BEGIN_LOCAL_FUNC_S8( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7)
+      HX_BEGIN_LOCAL_FUNC_S8( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7)
 #define HX_BEGIN_LOCAL_FUNC9(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8) \
-      HX_BEGIN_LOCAL_FUNC_S9( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8)
+      HX_BEGIN_LOCAL_FUNC_S9( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8)
 #define HX_BEGIN_LOCAL_FUNC10(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9) \
-      HX_BEGIN_LOCAL_FUNC_S10( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9)
+      HX_BEGIN_LOCAL_FUNC_S10( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9)
 #define HX_BEGIN_LOCAL_FUNC11(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10) \
-      HX_BEGIN_LOCAL_FUNC_S11( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10)
+      HX_BEGIN_LOCAL_FUNC_S11( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10)
 #define HX_BEGIN_LOCAL_FUNC12(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11) \
-      HX_BEGIN_LOCAL_FUNC_S12( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11)
+      HX_BEGIN_LOCAL_FUNC_S12( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11)
 #define HX_BEGIN_LOCAL_FUNC13(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12) \
-      HX_BEGIN_LOCAL_FUNC_S13( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12)
+      HX_BEGIN_LOCAL_FUNC_S13( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12)
 #define HX_BEGIN_LOCAL_FUNC14(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13) \
-      HX_BEGIN_LOCAL_FUNC_S14( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13)
+      HX_BEGIN_LOCAL_FUNC_S14( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13)
 #define HX_BEGIN_LOCAL_FUNC15(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14) \
-      HX_BEGIN_LOCAL_FUNC_S15( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14)
+      HX_BEGIN_LOCAL_FUNC_S15( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14)
 #define HX_BEGIN_LOCAL_FUNC16(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15) \
-      HX_BEGIN_LOCAL_FUNC_S16( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15)
+      HX_BEGIN_LOCAL_FUNC_S16( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15)
 #define HX_BEGIN_LOCAL_FUNC17(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16) \
-      HX_BEGIN_LOCAL_FUNC_S17( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16)
+      HX_BEGIN_LOCAL_FUNC_S17( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16)
 #define HX_BEGIN_LOCAL_FUNC18(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17) \
-      HX_BEGIN_LOCAL_FUNC_S18( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17)
+      HX_BEGIN_LOCAL_FUNC_S18( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17)
 #define HX_BEGIN_LOCAL_FUNC19(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17,t18,v18) \
-      HX_BEGIN_LOCAL_FUNC_S19( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17,t18,v18)
+      HX_BEGIN_LOCAL_FUNC_S19( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17,t18,v18)
 
 
 #define HX_DECLARE_DYNAMIC_FUNCTIONS \
@@ -1095,5 +1095,4 @@ static ::Dynamic __##class##func(const Array< ::Dynamic> &inArgs) \
 
 
 #endif
-
 
