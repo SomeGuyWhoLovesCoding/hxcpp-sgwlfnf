@@ -92,7 +92,8 @@ public:
    {
       return (VariantKey *)(this + 1);
    }
-   inline int findFixed(const ::String &inKey,bool inSkip5 = false);
+  inline int findFixed(const ::String &inKey, bool inSkip5 = false);
+  inline int findFixedWithHash(const ::String &inKey, int sought, int inStart);
 
 
 
