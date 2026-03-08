@@ -346,8 +346,6 @@ String _hx_std_file_contents_string( String name )
    return String::create(&buffer[0], buffer.size());
 }
 
-
-
 /**
    file_contents : f:string -> string
    <doc>Read the content of the file [f] and return it.</doc>
