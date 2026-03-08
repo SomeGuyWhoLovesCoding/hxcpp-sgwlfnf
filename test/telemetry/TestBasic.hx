@@ -1,12 +1,11 @@
-import utest.Test;
-import utest.Assert;
-
-class TestBasic extends Test
+class TestBasic extends haxe.unit.TestCase
 {
-  function testStartTelemetry()
+  public function new() super();
+
+  function testStartTelemetry(string:String)
   {
     var thread_id:Int = startTelemetry(true, true);
-    Assert.isTrue(thread_id>=0);
+    assertTrue(thread_id>=0);
   }
 
   function startTelemetry(with_profiler:Bool=true,

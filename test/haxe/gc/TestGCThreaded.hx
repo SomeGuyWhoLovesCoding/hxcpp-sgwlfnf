@@ -1,7 +1,4 @@
 package gc;
-
-import utest.Test;
-import utest.Assert;
 import haxe.io.Bytes;
 import haxe.crypto.Md5;
 import cpp.vm.Gc;
@@ -21,7 +18,7 @@ class Wrapper
 
 @:cppInclude("./ZoneTest.cpp")
 @:depend("./ZoneTest.cpp")
-class TestGCThreaded extends Test
+class TestGCThreaded extends haxe.unit.TestCase
 {
   @:keep
   static var keepRunning = false;
@@ -30,7 +27,7 @@ class TestGCThreaded extends Test
   var bigText:String;
 
 
-   function setup()
+   override public function setup()
    {
       var lines = [ for(i in 0...100000) "abc123\n" ];
       #if nme
@@ -45,8 +42,9 @@ class TestGCThreaded extends Test
       startNative();
       doThreadedWork(4,100);
       stopNative();
-      Assert.pass();
+      assertTrue(true);
    }
+
 
    public function testThreadMany():Void
    {
@@ -58,7 +56,7 @@ class TestGCThreaded extends Test
          doThreadedWork(100,100);
          #end
       stopNative();
-      Assert.pass();
+      assertTrue(true);
    }
 
    @:native("nativeLoop")
@@ -124,7 +122,7 @@ class TestGCThreaded extends Test
                      for(w in a)
                         sum += w.a;
 
-                  Assert.equals(100000, sum);
+                  assertTrue(sum==100000);
             }
             main.sendMessage('done');
          }) );

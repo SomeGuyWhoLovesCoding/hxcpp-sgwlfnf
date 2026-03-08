@@ -1,10 +1,7 @@
 package tests;
-
-import utest.Test;
-import utest.Assert;
 import externs.Rectangle;
 
-class TestRectangle extends Test
+class TestRectangle extends haxe.unit.TestCase
 {
    static var statRect:Rectangle;
    static var statRectPtr:RectanglePtr;
@@ -34,13 +31,13 @@ class TestRectangle extends Test
    {
       // Struct - copy semantic
       var rectangle = Rectangle.make(3,4);
-      Assert.equals( 0, rectangle.area() );
+      assertTrue( rectangle.area()==0 );
 
       var rect2 = rectangle;
       rect2.width = 2;
       rect2.height = 4;
-      Assert.equals( 8, rect2.area() );
-      Assert.equals( 0, rectangle.area() );
+      assertTrue( rect2.area()==8 );
+      assertTrue( rectangle.area()==0 );
 
 
       // Take address ...
@@ -51,23 +48,23 @@ class TestRectangle extends Test
       rectPtr.height = 5;
       var dynamicPtr:Dynamic  = rectPtr;
 
-      Assert.equals( 15, rectPtr.area() );
+      assertTrue( rectPtr.area()==15 );
       // Same object
-      Assert.equals( 15, rectangle.area() );
+      assertTrue( rectangle.area()==15 );
 
       var dynamicCopy:Dynamic = rectangle; // 3,4  3x5
 
       rectangle.width = 10;
       rectangle.height = 10;
-      Assert.equals( 100, rectangle.area() );
+      assertTrue( rectangle.area()==100 );
 
       // points to original object
       var fromDynamic:RectanglePtr = rectPtr;
-      Assert.equals( 100, fromDynamic.area() );
+      assertTrue( fromDynamic.area()==100 );
 
       // Restore from Dynamic ...
       rectangle = dynamicCopy;
-      Assert.equals( 15, rectangle.area() );
+      assertTrue( rectangle.area()==15 );
    }
 
    public function testReflect()
@@ -79,26 +76,26 @@ class TestRectangle extends Test
       statRectPtr = Rectangle.create(1,1,2,2);
       memRectPtr = statRect;
 
-      Assert.equals( statRectProp.area(), 12 );
-      Assert.equals( memRectProp.area(), 42 );
-      Assert.equals( statRectPtrProp.area(), 4 );
-      Assert.equals( memRectPtrProp.area(), 12 );
+      assertTrue( statRectProp.area()==12 );
+      assertTrue( memRectProp.area()==42 );
+      assertTrue( statRectPtrProp.area()==4 );
+      assertTrue( memRectPtrProp.area()==12 );
 
       var d:Dynamic = this;
       var r:Rectangle = d.memRect;
-      Assert.equals( r.area(), 42 );
+      assertTrue( r.area()==42 );
       var prop:Rectangle = Reflect.getProperty(d,"memRectProp");
-      Assert.equals( prop.area(), 42 );
+      assertTrue( prop.area()==42 );
       var propPtr:RectanglePtr = Reflect.getProperty(d,"memRectPtrProp");
-      Assert.equals( propPtr.area(), 12 );
+      assertTrue( propPtr.area()==12 );
 
       var d:Dynamic = TestRectangle;
       var r:Rectangle = d.statRect;
-      Assert.equals( r.area(), 12 );
+      assertTrue( r.area()==12 );
       var prop:Rectangle = Reflect.getProperty(d,"statRectProp");
-      Assert.equals( prop.area(), 12 );
+      assertTrue( prop.area()==12 );
       var propPtr:RectanglePtr = Reflect.getProperty(d,"statRectPtrProp");
-      Assert.equals( propPtr.area(), 4 );
+      assertTrue( propPtr.area()==4 );
 
 
       // No longer valid

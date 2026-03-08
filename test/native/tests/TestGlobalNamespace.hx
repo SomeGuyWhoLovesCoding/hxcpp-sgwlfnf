@@ -1,15 +1,12 @@
 package tests;
 
-import utest.Test;
-import utest.Assert;
-
-class TestGlobalNamespace extends Test
+class TestGlobalNamespace extends haxe.unit.TestCase
 {
    var shortPtr:externs.ShortPtr;
 
    public function testGen()
    {
-      Assert.pass();
+      assertTrue(true);
    }
 }
 

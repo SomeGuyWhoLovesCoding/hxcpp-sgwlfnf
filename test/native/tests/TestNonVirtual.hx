@@ -1,8 +1,5 @@
 package tests;
 
-import utest.Test;
-import utest.Assert;
-
 class Base
 {
    public function new() {}
@@ -19,22 +16,22 @@ class Derived extends Base
 }
 
 
-class TestNonVirtual extends Test
+class TestNonVirtual extends haxe.unit.TestCase
 {
    public function testOverride()
    {
       var derived = new Derived();
 
-      Assert.equals( "Derived", derived.getName() );
-      Assert.equals( "Derived", derived.getNvName() );
+      assertTrue( derived.getName() == "Derived" );
+      assertTrue( derived.getNvName() == "Derived" );
       var closure:Dynamic = derived.getNvName;
-      Assert.equals( "Derived", closure() );
+      assertTrue( closure() == "Derived" );
 
       var base:Base = derived;
 
-      Assert.equals( "Derived", base.getName());
-      Assert.equals( "Base", base.getNvName() );
+      assertTrue( base.getName() == "Derived" );
+      assertTrue( base.getNvName() == "Base" );
       var closure:Dynamic = base.getNvName;
-      Assert.equals( "Base", closure() );
+      assertTrue( closure() == "Base" );
    }
 }

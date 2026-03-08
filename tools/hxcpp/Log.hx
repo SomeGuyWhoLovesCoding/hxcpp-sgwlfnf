@@ -20,7 +20,6 @@ class Log
    public static var mute:Bool= false;
    public static var quiet:Bool = false;
    public static var verbose:Bool = false;
-   public static var showSetup:Bool = false;
 
    public  static var colorSupported:Null<Bool> = null;
    private static var sentWarnings = new Map<String,Bool>();
@@ -93,12 +92,6 @@ class Log
    {
       Log.info("",verboseMessage);
    }
-
-   inline public static function setup(verboseMessage:String):Void
-   {
-      Log.info(showSetup ? verboseMessage : "",verboseMessage);
-   }
-
 
    public static function lock():Void
    {

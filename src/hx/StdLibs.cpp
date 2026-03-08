@@ -194,32 +194,26 @@ Array<unsigned char> __hxcpp_resource_bytes(String inName)
 
 // -- hx::Native -------
 
+#if HXCPP_API_LEVEL >= 330
 extern "C" void __hxcpp_lib_main();
 namespace hx
 {
-   static std::string initReturnBuffer;
-   const char *Init(bool stayAttached)
+   const char *Init()
    {
       try
       {
          __hxcpp_lib_main();
-         if (!stayAttached)
-            SetTopOfStack(0,true);
          return 0;
       }
       catch(Dynamic e)
       {
          HX_TOP_OF_STACK
-         if (!stayAttached)
-         {
-            initReturnBuffer = e->toString().utf8_str();
-            SetTopOfStack(0,true);
-            return initReturnBuffer.c_str();
-         }
          return e->toString().utf8_str();
       }
    }
 }
+#endif
+
 
 // --- System ---------------------------------------------------------------------
 
@@ -242,17 +236,8 @@ int __hxcpp_irand(int inMax)
    return (lo | (mid<<12) | (hi<<24) ) % inMax;
 }
 
-#ifdef HX_WINDOWS
-LARGE_INTEGER qpcFrequency;
-#endif
-
 void __hxcpp_stdlibs_boot()
 {
-#ifdef HX_WINDOWS
-    // MSDN states that QueryPerformanceFrequency will always succeed on XP and above, so I'm ignoring the result.
-    QueryPerformanceFrequency(&qpcFrequency);
-#endif
-
    #if defined(_MSC_VER) && !defined(HX_WINRT)
    HMODULE kernel32 = LoadLibraryA("kernel32");
    if (kernel32)
@@ -291,7 +276,7 @@ void __hxcpp_stdlibs_boot()
    //  It does not cause fread to return immediately - as perhaps desired.
    //  But it does cause some new-line characters to be lost.
    //setbuf(stdin, 0);
-   setvbuf(stdout, NULL, _IOLBF, BUFSIZ);
+   setbuf(stdout, 0);
    setbuf(stderr, 0);
 }
 
@@ -316,7 +301,7 @@ void __trace(Dynamic inObj, Dynamic info)
       //PRINTF("%s:%d: %s\n", filename, line, text.raw_ptr() ? text.out_str(&convertBuf) : "null");
       PRINTF("%s:%d: %s\n", filename, line, text.raw_ptr() ? text.out_str(&convertBuf) : "null");
    }
-   fflush(stdout);
+
 }
 
 void __hxcpp_exit(int inExitCode)
@@ -336,7 +321,10 @@ double  __time_stamp()
       if (t0==0)
       {
          t0 = now;
-         period = 1.0/qpcFrequency.QuadPart;
+         __int64 freq;
+         QueryPerformanceFrequency((LARGE_INTEGER*)&freq);
+         if (freq!=0)
+            period = 1.0/freq;
       }
       if (period!=0)
          return (now-t0)*period;
@@ -352,26 +340,6 @@ double  __time_stamp()
    return t-t0;
 #else
    return (double)clock() / ( (double)CLOCKS_PER_SEC);
-#endif
-}
-
-::cpp::Int64 __time_stamp_ms()
-{
-#ifdef HX_WINDOWS
-    // MSDN states that QueryPerformanceCounter will always succeed on XP and above, so I'm ignoring the result.
-    auto now = LARGE_INTEGER{ 0 };
-    QueryPerformanceCounter(&now);
-
-    return now.QuadPart * LONGLONG{ 1000 } / qpcFrequency.QuadPart;
-#else
-    auto time = timespec();
-
-    if (clock_gettime(CLOCK_MONOTONIC, &time))
-    {
-        throw ::Dynamic(HX_CSTRING("Failed to get the monotonic clock time"));
-    }
-
-    return time.tv_sec * 1000 + (time.tv_nsec / 1000000);
 #endif
 }
 
@@ -615,7 +583,6 @@ void __hxcpp_println_string(const String &inV)
 {
    hx::strbuf convertBuf;
    PRINTF("%s\n", inV.out_str(&convertBuf));
-   fflush(stdout);
 }
 
 
@@ -666,16 +633,7 @@ Dynamic __hxcpp_parse_int(const String &inString)
    while (isspace(*str)) ++str;
    bool isHex = is_hex_string(str, strlen(str));
    char *end = 0;
-   long result;
-   if (isHex)
-   {
-      bool neg = str[0] == '-';
-      if (neg) str++;
-      result = strtoul(str,&end,16);
-      if (neg) result = -result;
-   }
-   else 
-      result = strtol(str,&end,10);
+   long result = strtol(str,&end,isHex ? 16 : 10);
    #ifdef HX_WINDOWS
    if (str==end && !isHex)
    #else

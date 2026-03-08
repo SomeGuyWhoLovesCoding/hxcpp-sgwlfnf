@@ -1,7 +1,4 @@
-import utest.Test;
-import utest.Assert;
-
-class TestIntHash extends Test
+class TestIntHash extends haxe.unit.TestCase
 {
    function spamAlot()
    {
@@ -54,9 +51,16 @@ class TestIntHash extends Test
 
    public function test()
    {
-      spamAlot();
-      
-      Assert.pass();
+      var err = "";
+      try
+      {
+         spamAlot();
+      }
+      catch(e:String)
+      {
+         err = e;
+      }
+      assertTrue(err=="");
    }
 
 }

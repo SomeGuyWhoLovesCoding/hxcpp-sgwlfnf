@@ -1,6 +1,3 @@
-import utest.Test;
-import utest.Assert;
-
 private enum GnarlyEnum
 {
    e0;
@@ -19,7 +16,7 @@ private enum GnarlyEnum
    getObject(i:Int);
 }
 
-class TestKeywords extends Test
+class TestKeywords extends haxe.unit.TestCase
 {
    public function new() super();
 
@@ -47,6 +44,6 @@ class TestKeywords extends Test
          case getObject(i): 1;
          default: 0;
       }
-      Assert.equals(3, count);
+      assertTrue(count==3);
    }
 }

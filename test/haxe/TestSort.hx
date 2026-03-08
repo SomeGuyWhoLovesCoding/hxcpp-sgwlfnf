@@ -1,6 +1,3 @@
-import utest.Test;
-import utest.Assert;
-
 class SortData
 {
    public var value:Int;
@@ -14,7 +11,8 @@ class SortData
    }
 }
 
-class TestSort extends Test
+
+class TestSort extends haxe.unit.TestCase
 {
    public function testObjects()
    {
@@ -56,7 +54,7 @@ class TestSort extends Test
             throw "Not stable sort";
       }
 
-      Assert.pass();
+      assertTrue(true);
    }
 }
 

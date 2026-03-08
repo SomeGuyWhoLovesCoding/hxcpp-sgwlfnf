@@ -38,10 +38,10 @@ public:
    inline VirtualArray Add(const T &inVal);
 
 
-   inline bool operator==(const Dynamic &value) const { return value==(Dynamic)*this; }
+   inline bool operator==(const Dynamic &value) const { return value==*this; }
    template<typename SOURCE_> inline bool operator==( const Array<SOURCE_> &inRHS );
 
-   inline bool operator!=(Dynamic value) const { return value!=(Dynamic)*this; }
+   inline bool operator!=(Dynamic value) const { return value!=*this; }
    template<typename SOURCE_> inline bool operator!=( const Array<SOURCE_> &inRHS ) { return inRHS!=*this; }
 
 };
@@ -91,7 +91,10 @@ public:
       return result;
    }
 
+   #if (HXCPP_API_LEVEL>330)
    int __Compare(const hx::Object *inRHS) const;
+   #endif
+
 
    inline int get_length() const
    {
@@ -606,7 +609,7 @@ public:
 // Build dynamic array from foreign array
 template<typename SOURCE_>
 VirtualArray::VirtualArray( const Array<SOURCE_> &inRHS )
-   : super( !inRHS.mPtr ? 0 : new VirtualArray_obj( inRHS.mPtr, true) )
+   : super( new VirtualArray_obj( inRHS.mPtr, true) )
 {
 }
 

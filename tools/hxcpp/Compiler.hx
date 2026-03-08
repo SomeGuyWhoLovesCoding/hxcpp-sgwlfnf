@@ -1,7 +1,6 @@
 import haxe.crypto.Md5;
 import haxe.io.Path;
 import sys.FileSystem;
-using StringTools;
 
 private class FlagInfo
 {
@@ -36,10 +35,8 @@ class Compiler
    public var mCPPFlags:Array<String>;
    public var mOBJCFlags:Array<String>;
    public var mPCHFlags:Array<String>;
-   public var mAsmFlags:Array<String>;
    public var mAddGCCIdentity:Bool;
    public var mExe:String;
-   public var mAsmExe:String;
    public var mOutFlag:String;
    public var mObjDir:String;
    public var mRelObjDir:String;
@@ -75,14 +72,12 @@ class Compiler
       mOBJCFlags = [];
       mMMFlags = [];
       mPCHFlags = [];
-      mAsmFlags = [];
       mAddGCCIdentity = false;
       mCompilerVersion = null;
       mRcExt = ".res";
       mObjDir = "obj";
       mOutFlag = "-o";
       mExe = inExe;
-      mAsmExe = inExe;
       mID = inID;
       mExt = ".o";
       mPCHExt = ".pch";
@@ -177,13 +172,12 @@ class Compiler
    function getArgs(inFile:File)
    {
       var nvcc = inFile.isNvcc();
-      var asm = inFile.isAsm();
       var isRc = mRcExe!=null && inFile.isResource();
       var args = nvcc ? inFile.mGroup.mCompilerFlags.concat( BuildTool.getNvccFlags() ) :
                        inFile.mCompilerFlags.concat(inFile.mGroup.mCompilerFlags);
       var tagFilter = inFile.getTags().split(",");
       addOptimTags(tagFilter);
-      if (!isRc && !asm)
+      if (!isRc)
          for(flag in mFlags)
             flag.add(args,tagFilter);
       var ext = mExt.toLowerCase();
@@ -197,10 +191,7 @@ class Compiler
       addIdentity(ext,args);
 
       var allowPch = false;
-
-      if (asm)
-         args = args.concat(mAsmFlags);
-      else if (nvcc)
+      if (nvcc)
          args = args.concat(mNvccFlags);
       else if (isRc)
          args = args.concat(mRcFlags);
@@ -306,9 +297,7 @@ class Compiler
       var obj_name = getObjName(inFile);
       var args = getArgs(inFile);
       var nvcc = inFile.isNvcc();
-      var asm = inFile.isAsm();
-      var exe = asm ? inFile.getAsmExe(mAsmExe) : nvcc ? BuildTool.getNvcc() : mExe;
-      var nasm = asm && (exe.endsWith("nasm") || exe.endsWith("nasm.exe"));
+      var exe = nvcc ? BuildTool.getNvcc() : mExe;
       var isRc =  mRcExe!=null && inFile.isResource();
       if (isRc)
          exe = mRcExe;
@@ -370,7 +359,7 @@ class Compiler
                args.push( (new Path( inFile.mDir + inFile.mName)).toString() );
          }
 
-         var out = (nvcc||nasm) ? "-o " : mOutFlag;
+         var out = nvcc ? "-o " : mOutFlag;
          if (out.substr(-1)==" ")
          {
             args.push(out.substr(0,out.length-1));

@@ -16,6 +16,7 @@ import sys.io.FileSeek;
 import sys.net.Host;
 import sys.net.Socket;
 import sys.net.UdpSocket;
+import sys.net.UdpSocket;
 import sys.io.Process;
 
 #if haxe4
@@ -29,23 +30,30 @@ import cpp.vm.Thread;
 using cpp.NativeArray;
 using cpp.AtomicInt;
 
-import utest.Assert;
+// These should be ignored in haxe 3.3...
+import cpp.link.StaticStd;
+import cpp.link.StaticRegexp;
+import cpp.link.StaticZlib;
+import cpp.link.StaticMysql;
+import cpp.link.StaticSqlite;
+
 
 @:buildXml('<include name="${HXCPP}/src/hx/libs/ssl/Build.xml"/>')
 extern class SslTest
 {
-   @:native("_hx_ssl_init")
+   @:extern @:native("_hx_ssl_init")
    extern public static function socket_init():Void;
 }
 
-class Test extends utest.Test
+class Test
 {
+   static var errors = new Array<String>();
+   static var lastErrorCount = 0;
+
    var x:Int;
 
    public function new()
    {
-      super();
-      
       x = 1;
    }
 
@@ -59,6 +67,28 @@ class Test extends utest.Test
       Sys.println("  " + t);
    }
 
+   public static function ok()
+   {
+      if (lastErrorCount==errors.length)
+      {
+         v("ok");
+         return 0;
+      }
+      else
+      {
+         lastErrorCount=errors.length;
+         v("bad");
+         return 1;
+      }
+   }
+
+   public static function error(e:String)
+   {
+      Sys.println("Test Failed:" + e);
+      errors.push(e);
+      return -1;
+   }
+
    public static function thisFile()
    {
       #if nme_install_tool
@@ -69,7 +99,7 @@ class Test extends utest.Test
       return bytes;
    }
 
-   function implTestDb(cnx:Connection) : Int
+   public static function testDb(cnx:Connection) : Int
    {
       v("connected :" + cnx);
       if (cnx.dbName() == "SQLite") {
@@ -94,7 +124,8 @@ class Test extends utest.Test
           )");
       }
       var dels = cnx.request("DELETE FROM UserPwd");
-      Assert.equals(0, dels.nfields, "Bad DELETE'd result");
+      if (dels.nfields != 0)
+         return error("Bad DELETE'd result");
       v("deleted " + dels.length + " existing rows");
 
       cnx.request("INSERT INTO UserPwd (name,age,money,password) VALUES ('John',32,100.45,X'c0ffee')");
@@ -104,14 +135,16 @@ class Test extends utest.Test
 
       var length = rset.length;
       v("found "+length+" users");
-      Assert.equals(2, length, "Bad user count");
+      if (length!=2)
+         return error("Bad user count");
       for( row in rset )
       {
          var pass:Dynamic = row.password;
-         var password = Std.isOfType(pass, haxe.io.BytesData) ? haxe.io.Bytes.ofData(pass) : pass;
+         var password = Std.is(pass, haxe.io.BytesData) ? haxe.io.Bytes.ofData(pass) : pass;
          var md5 = haxe.crypto.Md5.make(password).toHex().substr(0,8);
          v("  user "+row.name+" is "+row.age+" years old,  password:" + md5);
-         Assert.isFalse(md5!="5f80e231" && md5!="8ed0b363", "Bad binary blob store");
+         if (md5!="5f80e231" && md5!="8ed0b363")
+             return error("Bad binary blob store");
       }
       return 0;
    }
@@ -123,39 +156,54 @@ class Test extends utest.Test
       v(Std.string(now));
       var then = Date.fromString("1977-06-11");
       v(Std.string(then));
-
-      Assert.isFalse(now.getTime()<=then.getTime(), "Date fromString - time travel");
+      if (now.getTime()<=then.getTime())
+         return error("Date fromString - time travel");
 
       var later = DateTools.makeUtc(1996,5,4,17,55,11);
       v(Std.string(later));
 
       var diff:Float = untyped __global__.__hxcpp_timezone_offset(now.mSeconds);
       v("timezone offet:" + diff);
+
+      return ok();
    }
 
-   function testCompress()
+   public static function testCompress()
    {
       log("Test compress");
-      final bytes = thisFile();
+      var bytes = thisFile();
 
-      final compress = new Compress(9);
+      var compress = new Compress(9);
       compress.setFlushMode(FlushMode.FINISH);
-      final buffer = haxe.io.Bytes.alloc(bytes.length * 2 + 100);
-      final r = compress.execute(bytes,0,buffer,0);
+      var buffer = haxe.io.Bytes.alloc(bytes.length * 2 + 100);
+      var r = compress.execute(bytes,0,buffer,0);
       compress.close();
-      final compressed = buffer.sub(0,r.write);
+      var compressed = buffer.sub(0,r.write);
       v("compressed size " + compressed.length );
 
       v("try closing too many times...");
-      Assert.exception(() -> compress.close(), String, null, "Zlib closed without throwing error");
+      var caughtError = false;
+      try
+      {
+         compress.close();
+      }
+      catch(e:Dynamic)
+      {
+         v("correctly caught " + e );
+         caughtError = true;
+      }
+      if (!caughtError)
+         error("Zlib closed without throwing error");
 
       var decompressed = Uncompress.run(compressed);
       v("decompressed size:" + decompressed.length + "/" + bytes.length);
-      Assert.equals(0, decompressed.compare(bytes), "Compress/Uncompress mismatch");
+      if (decompressed.compare(bytes)!=0)
+         return error("Compress/Uncompress mismatch");
+      return ok();
    }
 
 
-   function testRegexp()
+   public static function testRegexp()
    {
       log("Test Regexp/BytesInput");
 
@@ -171,12 +219,13 @@ class Test extends utest.Test
       try {
         while(true)
         {
-           final line = input.readLine();
+           var line = input.readLine();
            if (match.match(line))
            {
-              final xml = Xml.parse(line.substr(5));
+              var xml = Xml.parse(line.substr(5));
               v("found xml:" + xml.firstElement().get("value"));
-              Assert.equals("Hello World!", xml.firstElement().get("value"));
+              if (xml.firstElement().get("value")!="Hello World!")
+                 return error("Bad universal greeting");
            }
            if (utf8Match.match(line))
            {
@@ -185,32 +234,38 @@ class Test extends utest.Test
            }
         }
       } catch (e:Dynamic) { }
-
-      Assert.isTrue(success, "Could not find success in utf8 code");
+      if (!success)
+         return error("Could not find success in utf8 code");
+      return ok();
    }
 
-   function testRegexpMixedUnicode() {
+   public static function testRegexpMixedUnicode() {
       var success = true;
 
       // when matching a utf8 subject string against a utf16 pattern and vice versa
       for (pattern => subject in ["[A-Za-zÀ-ÖØ-öø-ÿ0-9]+" => "a", "[A-Z]+" => "ÀÖA"]) {
-         Assert.isTrue(new EReg(pattern, "").match(subject), '"$subject" does not match against ~/$pattern/');
+         if (new EReg(pattern, "").match(subject)) {
+            v('"$subject" matches against ~/$pattern/');
+         } else {
+            return error('"$subject" does not match against ~/$pattern/');
+         }
       }
+      return ok();
    }
 
-   function testSqlite()
+   public static function testSqlite()
    {
       log("Test sqlite");
-      final dbFile = "hxcpp.db";
-      final cnx    = Sqlite.open(dbFile);
-
-      Assert.equals(0, implTestDb(cnx));
-
+      var dbFile = "hxcpp.db";
+      var cnx = Sqlite.open(dbFile);
+      if (testDb(cnx)!=0)
+         return error("db error");
       cnx.close();
+      return ok();
    }
 
 
-   function testMysql()
+   public static function testMysql()
    {
       log("Test mysql");
       var cnx:sys.db.Connection = null;
@@ -233,40 +288,37 @@ class Test extends utest.Test
 
       if (cnx!=null)
       {
-        Assert.equals(0, implTestDb(cnx));
-
+        if (testDb(cnx)!=0)
+           error("TestDB failed");
         cnx.close();
       }
-      else
-      {
-         Assert.pass();
-      }
+      return ok();
    }
 
-   function testRandom()
+   public static function testRandom()
    {
       log("Test Random");
-
-      final rand = new Random();
-      final f0 = rand.float();
-      final f1 = rand.float();
-
+      var rand = new Random();
+      var f0 = rand.float();
+      var f1 = rand.float();
       v('samples $f0,$f1');
-      Assert.notEquals(f0, f1, "Not random enough");
-
+      if (f0==f1)
+         return error("Not random enough");
       rand.setSeed(1);
-      final i0 = rand.int(256);
+      var i0 = rand.int(256);
       rand.setSeed(2);
-      final i1 = rand.int(256);
-
-      Assert.equals( 91, i0, "Non-repeatable random seed");
-      Assert.equals(217, i1, "Non-repeatable random seed");
-
+      var i1 = rand.int(256);
+      v('int samples $i0,$i1');
+      if (i0!=91 || i1!=217)
+         return error("Non-repeatable random seed, should be 91,217");
       var tries = 0;
       while(rand.int(1000)!=999)
          tries++;
+      v('tries to 1000 = $tries');
+      if (tries!=749)
+         return error("Non-repeatable random iterations");
 
-      Assert.equals(749, tries, "Non-repeatable random iterations");
+      return ok();
    }
 
    public static function tryFunc( func ) : Bool
@@ -280,98 +332,120 @@ class Test extends utest.Test
       return false;
    }
 
-   function testFile()
+   public static function testFile()
    {
       log("Test File");
-      final filename = "testfile.txt";
+      try
+      {
+      var filename = "testfile.txt";
       tryFunc( function() FileSystem.deleteFile(filename) );
       tryFunc( function() FileSystem.deleteFile(filename+"-copy") );
       tryFunc( function() FileSystem.deleteFile(filename+".bin") );
       tryFunc( function() FileSystem.deleteFile(filename+".out") );
 
-      final contents = "line1\nline2\n";
-      final bytes    = Bytes.ofString(contents);
+      var contents = "line1\nline2\n";
 
       v("compare...");
       File.saveContent(filename,contents);
-      Assert.equals(contents, File.getContent(filename));
+      if ( File.getContent(filename)!=contents )
+         return error("getContent mismatch");
 
       v("copy...");
       File.copy(filename,filename+"-copy");
-      Assert.equals(0, File.getBytes(filename+"-copy").compare(bytes), "copy getBytes mismatch");
-      
-      v("file in...");
+      var bytes = File.getBytes(filename+"-copy");
+      if ( bytes.compare( Bytes.ofString(contents) ) !=0 )
+         return error("copy getBytes mismatch");
+
       File.saveBytes(filename+".bin",bytes);
-      final fileIn = File.read(filename+".bin");
-      Assert.equals(contents.charCodeAt(0), fileIn.readByte(), "File readByte mismatch");
-      final buffer = Bytes.alloc(5);
+
+      v("file in...");
+      var fileIn = File.read(filename+".bin");
+      if (fileIn.readByte()!=contents.charCodeAt(0))
+         return error("File readByte mismatch");
+      var buffer = Bytes.alloc(5);
       buffer.set(0,'-'.code);
       buffer.set(4,'+'.code);
-      Assert.equals(3, fileIn.readBytes(buffer,1,3), "Could not read 3 bytes");
-      Assert.equals("-ine+", buffer.toString(), "Bad sub-buffer readBytes");
-
+      if (fileIn.readBytes(buffer,1,3)!=3)
+         return error("Could not read 3 bytes");
+      v( "read 3: " + buffer.toString() );
+      if ( buffer.toString() != "-ine+" )
+         return error("Bad sub-buffer readBytes");
       v("seek...");
-      Assert.equals(4, fileIn.tell());
-      fileIn.seek(4, SeekCur);
-      Assert.equals(8, fileIn.tell());
+      if (fileIn.tell()!=4)
+         return error("tell!=4");
+      fileIn.seek(4, SeekCur );
+      if (fileIn.tell()!=8)
+         return error("SeekCur tell!=8");
       fileIn.seek(7, SeekBegin );
-      Assert.equals(7, fileIn.tell());
-
-      final rest = Bytes.alloc( contents.length - fileIn.tell() );
+      if (fileIn.tell()!=7)
+         return error("SeekSet tell!=7");
+      var rest = Bytes.alloc( contents.length - fileIn.tell() );
       fileIn.readBytes(rest,0,rest.length);
-      Assert.isFalse(fileIn.eof(), "File at end, but not eof");
-      fileIn.seek(-contents.length, SeekEnd);
-      Assert.equals(0, fileIn.tell(), "File seek from end to beginning failed");
+      if (fileIn.eof())
+         return error("File at end, but not eof");
+      fileIn.seek( -contents.length, SeekEnd );
+      if (fileIn.tell()!=0)
+         return error("File seek from end to beginning failed");
       fileIn.close();
 
       v("write...");
-      final fileOut = File.write(filename+".out");
-
+      var fileOut = File.write(filename+".out");
       fileOut.writeByte('W'.code);
-      Assert.equals(3, fileOut.writeBytes(buffer,1,3), "Could not write 3 bytes");
-      Assert.equals(4, fileOut.tell(), "Bad tell on file write");
-
+      if (fileOut.writeBytes(buffer,1,3)!=3)
+         return error("Could not write 3 bytes");
+      if (fileOut.tell()!=4)
+         return error("Bad tell on file write");
       fileOut.flush();
-      Assert.equals("Wine", File.getContent(filename+".out"), "Bad reading after flush");
-
+      if (File.getContent(filename+".out")!="Wine")
+         return error("Bad reading after flush");
       fileOut.seek(1,SeekBegin);
       fileOut.writeByte('a'.code);
       fileOut.close();
-
-      final contents =  File.getContent(filename+".out");
+      var contents =  File.getContent(filename+".out");
       v("have :" + contents);
-      Assert.equals("Wane", contents, "Bad readback after seek");
+      if (contents!="Wane")
+         return error("Bad readback after seek");
 
       v("cleanup...");
       FileSystem.deleteFile(filename);
       FileSystem.deleteFile(filename + "-copy");
       FileSystem.deleteFile(filename + ".bin");
       FileSystem.deleteFile(filename + ".out");
+      return ok();
+      }
+      catch(e:Dynamic)
+      {
+         return error("Unexpected error in testFile: " + e);
+      }
+
    }
 
-   function testLocalhost()
+   public static function testHost()
    {
       log("Test Host");
-      
-      final localhost = Host.localhost();
-      
+      try
+      {
+      var localhost = Host.localhost();
       v('localhost :$localhost');
+      var host = new Host(localhost);
+      v('host :$host');
+      // var reverse = host.reverse();
+      // v('reverse :$reverse');
+      return ok();
+      }
+      catch(e:Dynamic)
+      {
+         return error("Unexpected error in testHost: " + e);
+      }
 
-      Assert.notNull(localhost);
-      Assert.notEquals(0, localhost.length);
    }
 
-   function testHost()
-   {
-      log("Test Host");
-      
-      v('host :${ new Host("github.com") }');
 
-      Assert.pass();
-   }
-
-   function testFileSystem()
+   public static function testFileSystem()
    {
+      try
+      {
+
       log("Test FileSystem");
       tryFunc( function() FileSystem.deleteFile("dir/file.txt") );
       tryFunc( function() FileSystem.deleteFile("dir/txt.file") );
@@ -379,111 +453,151 @@ class Test extends utest.Test
       tryFunc( function() FileSystem.deleteDirectory("dir") );
 
       v("create dir");
-      FileSystem.createDirectory("dir");
-      FileSystem.createDirectory("dir/child");
+      if (!tryFunc( function() FileSystem.createDirectory("dir") ) )
+         return error("Could not create 'dir'");
+      if (!tryFunc( function() FileSystem.createDirectory("dir/child") ) )
+         return error("Could not create 'dir/child'");
       File.saveContent("dir/file.txt","hello");
-      
-      final stat = FileSystem.stat("dir/file.txt");
+      var stat = FileSystem.stat("dir/file.txt");
       v(Std.string(stat));
-
-      Assert.equals(5, stat.size, "File does not contain 5 bytes");
-      Assert.equals(19, Std.string(stat.ctime).length, "File ctime does not appear to be a date");
+      if (stat.size!=5)
+         return error("File does not contain 5 bytes");
+      if ( Std.string(stat.ctime).length != 19)
+         return error("File ctime does not appear to be a date");
 
       v("exists");
-      Assert.isTrue(FileSystem.exists("dir"));
-      Assert.isTrue(FileSystem.exists("dir/file.txt"));
-
-      final files = FileSystem.readDirectory("dir");
+      if (!FileSystem.exists("dir"))
+         return error("'dir' should exist");
+      if (!FileSystem.exists("dir/file.txt"))
+         return error("'/file.txt' should exist");
+      var files = FileSystem.readDirectory("dir");
       v("dir contents:" + files);
-
-      Assert.equals(2, files.length);
-      Assert.contains("file.txt", files);
-      Assert.contains("child", files);
-
-      Assert.raises(() -> FileSystem.deleteDirectory("dir/junk"));
-      Assert.raises(() -> FileSystem.deleteFile("dir/junk"));
-      Assert.raises(() -> FileSystem.deleteFile("dir/child"));
-      Assert.raises(() -> FileSystem.deleteDirectory("dir/file.txt"));
-
-      final fullPath = FileSystem.fullPath("dir/child");
+      if (files.length!=2 || files.indexOf("file.txt")<0 || files.indexOf("child")<0)
+         return error("Unexpected dir contents " + (files.indexOf("file.txt") + "," + files.indexOf("child")) );
+      if (tryFunc( function() FileSystem.deleteDirectory("dir/junk") ) )
+         return error("No error deleting junk directory");
+      if (tryFunc( function() FileSystem.deleteFile("dir/junk") ) )
+         return error("No error deleting junk file");
+      if (tryFunc( function() FileSystem.deleteFile("dir/child") ) )
+         return error("No error deleting directory as file");
+      if (tryFunc( function() FileSystem.deleteDirectory("dir/file.txt") ) )
+         return error("No error deleting file as directory");
+      var fullPath = FileSystem.fullPath("dir/child");
       v('fullPath: $fullPath');
-      final fullPath = FileSystem.fullPath("dir/file.txt");
+      var fullPath = FileSystem.fullPath("dir/file.txt");
       v('fullPath: $fullPath');
-
       v("isDirectory...");
-      Assert.isFalse(FileSystem.isDirectory("dir/file.txt"), "file appears to be a directory");
-      Assert.isTrue(FileSystem.isDirectory("dir/child"), "directory appears to not be a directory");
-      Assert.isFalse(FileSystem.isDirectory("dir/junk"), "junk appears to be a directory");
-      Assert.isFalse(FileSystem.isDirectory("dir/file.txt"), "file appears to be a directory");
+      if (FileSystem.isDirectory("dir/file.txt"))
+         return error("file appears to be a directory");
+      if (!FileSystem.isDirectory("dir/child"))
+         return error("directory appears to not be a directory");
+      if (FileSystem.isDirectory("dir/junk"))
+         return error("junk appears to be a directory");
+      if (FileSystem.isDirectory("dir/file.txt"))
+         return error("file appears to be a directory");
 
       v("rename...");
-
-      Assert.exception(() -> FileSystem.rename("dir/a", "dir/b"), String, null, "No error renaming missing file");
-
+      if (tryFunc( function() FileSystem.rename("dir/a", "dir/b")) )
+         return error("No error renaming missing file");
       FileSystem.rename("dir/file.txt","dir/txt.file");
-      
-      Assert.isFalse(FileSystem.exists("dir/file.txt"));
-      Assert.isTrue(FileSystem.exists("dir/txt.file"));
-
+      if (!FileSystem.exists("dir/txt.file") || FileSystem.exists("dir/file.txt"))
+         return error("Rename seemed to go wrong " + FileSystem.readDirectory("dir"));
       v("cleanup..");
       FileSystem.deleteFile("dir/txt.file");
       FileSystem.deleteDirectory("dir/child");
       FileSystem.deleteDirectory("dir");
+      if (FileSystem.readDirectory(".").indexOf("dir")>=0)
+         return error("Directory removed, but sill there?:" + FileSystem.readDirectory("."));
 
-      // Assert.equals(0, FileSystem.readDirectory(".").indexOf("dir"), "Directory removed, but sill there?");
-      if (FileSystem.readDirectory(".").indexOf("dir")>=0) {
-         Assert.fail("Directory removed, but sill there?:" + FileSystem.readDirectory("."));
+      return ok();
+      }
+      catch(e:Dynamic)
+      {
+         return error("Unexpected error in testFileSystem: " + e);
       }
    }
 
-   function testSys()
+
+   public static function testSys()
    {
       log("Test Sys");
-
+      try
       {
-         final key   = "myKey";
-         final value = "123";
-
-         Sys.putEnv(key, value);
-
-         Assert.equals(value, Sys.getEnv(key));
-         Assert.equals(value, Sys.environment().get(key));
-      }
-
-      {
+         Sys.putEnv("mykey","123");
+         var env = Sys.getEnv("mykey");
+         v("got env:" + env);
+         if (env!="123")
+            return error("Bad environment get");
          v("little sleep...");
-
-         final t0 = Sys.time();
+         var t0 = Sys.time();
          Sys.sleep(0.1);
-         final t1 = Sys.time();
-
+         var t1 = Sys.time();
          v("Slept for: " + (t1-t0));
+         if (t1<=t0 || (t1-t0)>10)
+            return error("Too sleepy");
+         v("CpuTime: " + Sys.cpuTime());
+         v("Cwd: " + Sys.getCwd());
+         v("Program Path: " + Sys.programPath());
+         var env = Sys.environment();
+         v("Environment mykey: " + env.get("mykey") );
+         if (env.get("mykey")!="123")
+            return error("Could not find mykey in environment");
+         v("Ignore getChar auto test");
+         v("Args: " + Sys.args());
+         v("SystemName: " + Sys.systemName());
+         v("Skipping  Sys.setTimeLocale" + Sys.setTimeLocale);
+         // Sys.command
 
-         Assert.isFalse(t1<=t0 || (t1-t0)>10, "Too sleepy");
+         return ok();
       }
-      
-      v("CpuTime: " + Sys.cpuTime());
-      v("Cwd: " + Sys.getCwd());
-      v("Program Path: " + Sys.programPath());
-      v("Ignore getChar auto test");
-      v("Args: " + Sys.args());
-      v("SystemName: " + Sys.systemName());
-      v("Skipping  Sys.setTimeLocale" + Sys.setTimeLocale);
+      catch(e:Dynamic)
+      {
+         return error("Unexpected error in testSys: " + e);
+      }
+
    }
 
-   function testCommand()
+   public static function testCommand()
    {
       log("Test Command");
+      try
+      {
+      var code = Sys.command( Sys.programPath(), ["exit", "13"]);
+      if (code!=13)
+         return error('Process exited with code $code, not 13');
 
-      final expected = 13;
-      
-      Assert.equals(expected, Sys.command( Sys.programPath(), ["exit", Std.string(expected)]));
+      return ok();
+      }
+      catch(e:Dynamic)
+      {
+         return error("Unexpected error in testCommand: " + e);
+      }
    }
 
-   function testPoll()
+   public static function runAsProcess()
+   {
+      var args = Sys.args();
+      var job = args.shift();
+      if (job=="exit")
+      {
+         Sys.exit( Std.parseInt(args[0]) );
+      }
+      else if (job=="socket")
+      {
+         socketClient();
+         Sys.exit(0);
+      }
+      else
+         Sys.println('Unknown job : "$job"');
+      Sys.exit(-99);
+   }
+
+   public static function testPoll()
    {
       log("Test poll");
-      
+      try
+      {
+
       var poll = new Poll(4);
       poll.prepare([],[]);
       var t0 = Sys.time();
@@ -498,19 +612,31 @@ class Test extends utest.Test
          return error("Timeout too slow");
       */
 
-      Assert.pass();
+      return ok();
+      }
+      catch(e:Dynamic)
+      {
+         return error("Unexpected error in testPoll: " + e);
+      }
+
    }
 
 
-   function testUdpSocket()
+   public static function testUdpSocket()
    {
       log("Test UdpSocket");
-      
-      var udp = new UdpSocket();
+      try
+      {
 
+      var udp = new UdpSocket();
       udp.close();
 
-      Assert.pass();
+      return ok();
+      }
+      catch(e:Dynamic)
+      {
+         return error("Unexpected error in testUdpSocket: " + e);
+      }
    }
 
    static var socketClientRunning = true;
@@ -535,9 +661,11 @@ class Test extends utest.Test
       });
    }
 
-   function testSocket()
+   public static function testSocket()
    {
       log("Test Socket");
+      try
+      {
       v("Spawn client..");
       var proc = new Process( Sys.programPath(), ["socket"] );
       readOutput(proc);
@@ -558,9 +686,12 @@ class Test extends utest.Test
       connected.setFastSend(true);
       connected.write("ping");
       var buffer = Bytes.alloc(8);
-
-      Assert.equals(8, input.readBytes(buffer,0,buffer.length));
-      Assert.equals("pingpong", buffer.toString());
+      if (input.readBytes(buffer,0,8)!=8)
+         return error("Could not read from socket");
+      var got = buffer.toString();
+      v('got $got');
+      if (got!="pingpong")
+         return error("Bad socket read");
 
       v("close connection..");
       connected.close();
@@ -574,7 +705,16 @@ class Test extends utest.Test
          v("wait for client...");
          Sys.sleep(0.1);
       }
-      Assert.isFalse(socketClientRunning, "Socket client did not finish");
+      if (socketClientRunning)
+         return error("Socket client did not finish");
+
+      return ok();
+      }
+      catch(e:Dynamic)
+      {
+         return error("Unexpected error in Socket: " + e);
+      }
+
    }
 
    public static function socketClient()
@@ -618,42 +758,50 @@ class Test extends utest.Test
       socket.shutdown(true,true);
    }
 
-   function testSsl()
+   public static function testSsl() : Int
    {
       log("Test ssl");
-
       SslTest.socket_init();
-
-      Assert.pass();
+      return ok();
    }
 
-   function testSerialization()
+   public static function testSerialization() : Int
    {
       log("Test serialization");
-
       var orig:haxe.Int64 = haxe.Int64.make(0xdeadbeef,0xbeefdead);
       var recon:haxe.Int64 = haxe.Unserializer.run(haxe.Serializer.run(orig));
+      if (orig!=recon)
+         error('Bad Int64 serialization $orig != $recon');
 
-      Assert.equals(orig, recon);
+      return ok();
    }
+
 
    // Hide from optimizer
    static function getOne() return 1;
 
-   function testThread()
+   public static function testThread()
    {
       log("Test thread");
       v("atomics..");
 
       var a:AtomicInt = getOne();
       var aPtr = cpp.Pointer.addressOf(a);
-      Assert.isFalse(aPtr.exchangeIf(2,3));
-      Assert.isTrue(aPtr.exchangeIf(1,3));
-      Assert.equals(3, a);
-      Assert.equals(3, aPtr.atomicInc());
-      Assert.equals(4, a);
-      Assert.equals(4, aPtr.atomicDec());
-      Assert.equals(3, a);
+      if (aPtr.exchangeIf(2,3))
+         error("Bad exchageIf " + a);
+      if (!aPtr.exchangeIf(1,3))
+         error("No exchageIf " + a);
+      if (a!=3)
+         error("Bad exchageIf value ");
+      if (aPtr.atomicInc()!=3)
+         error("Bad atomicInc return");
+      if (a!=4)
+         error("Bad atomicInc value " + a);
+      if (aPtr.atomicDec()!=4)
+         error("Bad atomicDec return");
+      if (a!=3)
+         error("Bad atomicDec value " + a);
+
 
       a = getOne();
       v('deque a=$a');
@@ -692,77 +840,166 @@ class Test extends utest.Test
          v('got $i');
       }
 
-      Assert.equals(1, a);
+      if (a!=1)
+         error('Bad deque count : $a');
+
+      return ok();
    }
 
-   function testFloatReads()
+   public static function testFloatReads()
    {
       log("Test float bytes");
 
-      final value = 46;
-      final bytes = haxe.io.Bytes.alloc(1+4+8);
-      bytes.fill(0,1,value);
+      var bytes =haxe.io.Bytes.alloc(1+4+8);
+      bytes.fill(0,1,46);
 
       // Test unaligned read/write
       bytes.setFloat(1,1.25);
       bytes.setDouble(5,1.25);
 
-      Assert.equals(value, bytes.get(0), "Bad byte 0");
-      Assert.equals(bytes.getDouble(5), bytes.getFloat(1), "Bad byte read/write");
+      if (bytes.get(0)!=46)
+         error("Bad byte 0");
+
+      if (bytes.getDouble(5)!=bytes.getFloat(1))
+         error("Bad byte read/write");
+
+      return ok();
    }
 
    public dynamic function getX() return x;
 
-   function testDynamicMember()
+   public static function testDynamicMember()
    {
       log("Test dynamic member");
-
-      Assert.equals(1, getX(), "Bad dynamic member function");
+      var t = new Test();
+      if (t.getX()!=1)
+         error("Bad dynamic member function");
+      return ok();
    }
 
 
    @:noDebug
-   function testNoDebug()
+   public static function testNoDebug()
    {
       log("Test noDebug");
-
       // Just testing to see it it compiles...
-      Assert.notNull(new haxe.io.BytesBuffer(), "bad alloc");
+      if (  null == new haxe.io.BytesBuffer() )
+         error("Bad alloc");
+      return ok();
    }
 
    @:noDebug
-   function testNoDebugNoAlloc()
+   public static function testNoDebugNoAlloc()
    {
-      Assert.pass("Test noDebug, no alloc");
+      log("Test noDebug, no alloc");
+      return ok();
    }
 
-   function testIntParsing()
+   public static function testIntParsing()
    {
       log("Test int parsing");
+      var val = Std.parseInt('0x1');
+      if (val != 1)
+      {
+         error('parsed hex value was not 1, $val');
+      }
+      var val = Std.parseInt(' 0x1');
+      if (val != 1)
+      {
+         error('parsed hex value was not 1, $val');
+      }
+      var val = Std.parseInt('\t0x1');
+      if (val != 1)
+      {
+         error('parsed hex value was not 1, $val');
+      }
+      var val = Std.parseInt('   0x');
+      if (val != 0)
+      {
+         error('parsed hex value was not 0, $val');
+      }
+      var val = Std.parseInt('   0xyz');
+      if (val != 0)
+      {
+         error('parsed hex value was not 0, $val');
+      }
+      var val = Std.parseInt('-0x1');
+      if (val != -1)
+      {
+         error('parsed hex value was not 1, $val');
+      }
+      var val = Std.parseInt(' -0x1');
+      if (val != -1)
+      {
+         error('parsed hex value was not 1, $val');
+      }
+      var val = Std.parseInt('\t-0x1');
+      if (val != -1)
+      {
+         error('parsed hex value was not 1, $val');
+      }
+      var val = Std.parseInt('   -0x');
+      if (val != 0)
+      {
+         error('parsed hex value was not 0, $val');
+      }
+      var val = Std.parseInt('   -0xyz');
+      if (val != 0)
+      {
+         error('parsed hex value was not 0, $val');
+      }
+      var val = Std.parseInt('  5');
+      if (val != 5)
+      {
+         error('parsed int value was not 5, $val');
+      }
+      var val = Std.parseInt(' \t\n5');
+      if (val != 5)
+      {
+         error('parsed int value was not 5, $val');
+      }
 
-      Assert.equals( 1, Std.parseInt('0x1'));
-      Assert.equals( 1, Std.parseInt(' 0x1'));
-      Assert.equals( 1, Std.parseInt('\t0x1'));
-      Assert.equals( 0, Std.parseInt('   0x'));
-      Assert.equals( 0, Std.parseInt('   0xyz'));
-      Assert.equals(-1, Std.parseInt('-0x1'));
-      Assert.equals(-1, Std.parseInt(' -0x1'));
-      Assert.equals(-1, Std.parseInt('\t-0x1'));
-      Assert.equals( 0, Std.parseInt('   -0x'));
-      Assert.equals( 0, Std.parseInt('   -0xyz'));
-      Assert.equals( 5, Std.parseInt('  5'));
-      Assert.equals( 5, Std.parseInt(' \t\n5'));
+      return ok();
    }
 
    public static function main()
    {
-      switch Sys.args() {
-         case [ 'exit', code ]:
-            Sys.exit(Std.parseInt(code));
-         case [ 'socket' ]:
-            socketClient();
-         case _:
-            utest.UTest.run([ new Test() ]);
+      var exitCode = 0;
+      if (Sys.args().length>0)
+      {
+         runAsProcess();
+      }
+      else
+      {
+         exitCode |= testDate();
+         exitCode |= testCompress();
+         exitCode |= testRegexp();
+         exitCode |= testRegexpMixedUnicode();
+         exitCode |= testSqlite();
+         exitCode |= testMysql();
+         exitCode |= testRandom();
+         exitCode |= testFile();
+         exitCode |= testFileSystem();
+         exitCode |= testHost();
+         exitCode |= testSys();
+         exitCode |= testCommand();
+         exitCode |= testPoll();
+         exitCode |= testUdpSocket();
+         exitCode |= testSocket();
+         exitCode |= testThread();
+         exitCode |= testSsl();
+         exitCode |= testSerialization();
+         exitCode |= testFloatReads();
+         exitCode |= testDynamicMember();
+         exitCode |= testNoDebug();
+         exitCode |= testNoDebugNoAlloc();
+         exitCode |= testIntParsing();
+
+         if (exitCode!=0)
+            Sys.println("############# Errors running tests:\n   " + errors.join("\n   ") );
+         else
+            Sys.println("All tests passed.");
+         Sys.exit(exitCode);
       }
    }
 }

@@ -1,13 +1,11 @@
-import utest.Test;
-import utest.Assert;
-
 class ObjectData
 {
    public var id:Int;
    public function new(inId:Int) id = inId;
 }
 
-class TestObjectHash extends Test
+
+class TestObjectHash extends haxe.unit.TestCase
 {
    function spamAlot()
    {
@@ -77,9 +75,17 @@ class TestObjectHash extends Test
 
    public function test()
    {
-      spamAlot();
-      
-      Assert.pass();
+      var err = "";
+      try
+      {
+         spamAlot();
+      }
+      catch(e:Dynamic)
+      {
+         trace(e);
+         err = e;
+      }
+      assertTrue(err=="");
    }
 
 }

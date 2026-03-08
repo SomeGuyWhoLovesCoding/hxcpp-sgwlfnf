@@ -628,8 +628,8 @@ public:
 	CONDITION_VARIABLE cond;
 #endif
 #else
-	pthread_cond_t *cond;
-	pthread_mutex_t *mutex;
+	pthread_cond_t cond;
+	pthread_mutex_t mutex;
 #endif
   hx::InternalFinalizer *mFinalizer;
   hxCondition() {
@@ -645,13 +645,11 @@ public:
 #else
     pthread_condattr_t cond_attr;
     pthread_condattr_init(&cond_attr);
-    cond = new pthread_cond_t();
-    pthread_cond_init(cond, &cond_attr);
+    pthread_cond_init(&cond, &cond_attr);
     pthread_condattr_destroy(&cond_attr);
     pthread_mutexattr_t mutex_attr;
     pthread_mutexattr_init(&mutex_attr);
-    mutex = new pthread_mutex_t();
-    pthread_mutex_init(mutex, &mutex_attr);
+    pthread_mutex_init(&mutex, &mutex_attr);
     pthread_mutexattr_destroy(&mutex_attr);
 #endif
   }
@@ -669,10 +667,8 @@ public:
       DeleteCriticalSection(&cond->cs);
 #endif
 #else
-      pthread_cond_destroy(cond->cond);
-      delete cond->cond;
-      pthread_mutex_destroy(cond->mutex);
-      delete cond->mutex;
+      pthread_cond_destroy(&cond->cond);
+      pthread_mutex_destroy(&cond->mutex);
 #endif
     }
   }
@@ -683,7 +679,7 @@ public:
 	  EnterCriticalSection(&cs);
 #endif
 #else
-	  pthread_mutex_lock(mutex);
+	  pthread_mutex_lock(&mutex);
 #endif
   }
 
@@ -695,7 +691,7 @@ public:
 	return false;
 #endif
 #else
-    return pthread_mutex_trylock(mutex);
+    return pthread_mutex_trylock(&mutex);
 #endif
   }
 
@@ -705,7 +701,7 @@ public:
 	  LeaveCriticalSection(&cs);
 #endif
 #else
-	  pthread_mutex_unlock(mutex);
+	  pthread_mutex_unlock(&mutex);
 #endif
   }
 
@@ -715,7 +711,7 @@ public:
 	  SleepConditionVariableCS(&cond,&cs,INFINITE);
 #endif
 #else
-	  pthread_cond_wait(cond, mutex);
+	  pthread_cond_wait(&cond, &mutex);
 #endif
   }
 
@@ -739,7 +735,7 @@ public:
     delta -= idelta2 * 1e9;
     t.tv_sec = tv.tv_sec + idelta + idelta2;
     t.tv_nsec = (long)delta;
-    return pthread_cond_timedwait(cond, mutex, &t);
+    return pthread_cond_timedwait(&cond, &mutex, &t);
 #endif
   }
   void Signal() {
@@ -748,7 +744,7 @@ public:
 	  WakeConditionVariable(&cond);
 #endif
 #else
-	  pthread_cond_signal(cond);
+	  pthread_cond_signal(&cond);
 #endif
   }
   void Broadcast() {
@@ -757,7 +753,7 @@ public:
 	  WakeAllConditionVariable(&cond);
 #endif
 #else
-	  pthread_cond_broadcast(cond);
+	  pthread_cond_broadcast(&cond);
 #endif
   }
 };

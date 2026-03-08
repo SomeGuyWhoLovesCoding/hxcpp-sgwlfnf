@@ -38,6 +38,8 @@
 
 // ---- Enum ----------------------
 
+#if (HXCPP_API_LEVEL >= 330)
+
 #define HX_DEFINE_CREATE_ENUM(enum_obj) \
 static  ::Dynamic Create##enum_obj(::String inName,::hx::DynamicArray inArgs) \
 { \
@@ -50,11 +52,43 @@ static  ::Dynamic Create##enum_obj(::String inName,::hx::DynamicArray inArgs) \
    return result->__Run(inArgs); \
 }
 
+
+#else
+
+#define HX_DEFINE_CREATE_ENUM(enum_obj) \
+static  ::Dynamic Create##enum_obj(::String inName,::hx::DynamicArray inArgs) \
+{ \
+   int idx =  enum_obj::__FindIndex(inName); \
+   if (idx<0) __hxcpp_dbg_checkedThrow(HX_INVALID_ENUM_CONSTRUCTOR(#enum_obj, inName)); \
+   int count =  enum_obj::__FindArgCount(inName); \
+   int args = inArgs.GetPtr() ? inArgs.__length() : 0; \
+   if (args!=count) __hxcpp_dbg_checkedThrow(HX_INVALID_ENUM_ARG_COUNT(#enum_obj, inName, count, args)); \
+   ::Dynamic result =(new enum_obj())->__Field(inName,HX_PROP_DYNAMIC); \
+   if (args==0 || !result.mPtr) return result; \
+   return result->__Run(inArgs); \
+}
+
+#endif
+
+
 // ---- Fields ----------------------
 
-#define HX_IS_INSTANCE_OF bool _hx_isInstanceOf(int inClassId) { return inClassId==1 || inClassId==(int)_hx_ClassId; }
+#if (HXCPP_API_LEVEL<331)
+   #define HX_DO_RTTI_BASE \
+      bool __Is(::hx::Object *inObj) const { return dynamic_cast<OBJ_ *>(inObj)!=0; }
+#else
+   #define HX_DO_RTTI_BASE
+#endif
+
+#if (HXCPP_API_LEVEL>331)
+   #define HX_IS_INSTANCE_OF bool _hx_isInstanceOf(int inClassId) { return inClassId==1 || inClassId==(int)_hx_ClassId; }
+#else
+   #define HX_IS_INSTANCE_OF
+#endif
+
 
 #define HX_DO_RTTI_ALL \
+   HX_DO_RTTI_BASE \
    static ::hx::ObjectPtr< ::hx::Class_obj> __mClass; \
    ::hx::ObjectPtr< ::hx::Class_obj > __GetClass() const { return __mClass; } \
    inline static ::hx::ObjectPtr< ::hx::Class_obj> &__SGetClass() { return __mClass; } \
@@ -72,6 +106,7 @@ static  ::Dynamic Create##enum_obj(::String inName,::hx::DynamicArray inArgs) \
 	static void __register();
 
 #define HX_DO_ENUM_RTTI_INTERNAL \
+   HX_DO_RTTI_BASE  \
     ::hx::Val __Field(const ::String &inString, ::hx::PropertyAccess inCallProp); \
    static int __FindIndex(::String inName); \
    static int __FindArgCount(::String inName);
@@ -960,7 +995,11 @@ static ::Dynamic __##class##func(const Array< ::Dynamic> &inArgs) \
    void __Visit( ::hx::VisitContext *__inCtx) { DoVisitThis(__inCtx); HX_VISIT_MEMBER(v0); HX_VISIT_MEMBER(v1); HX_VISIT_MEMBER(v2); HX_VISIT_MEMBER(v3); HX_VISIT_MEMBER(v4); HX_VISIT_MEMBER(v5); HX_VISIT_MEMBER(v6); HX_VISIT_MEMBER(v7); HX_VISIT_MEMBER(v8); HX_VISIT_MEMBER(v9); HX_VISIT_MEMBER(v10); HX_VISIT_MEMBER(v11); HX_VISIT_MEMBER(v12); HX_VISIT_MEMBER(v13); HX_VISIT_MEMBER(v14); HX_VISIT_MEMBER(v15); HX_VISIT_MEMBER(v16); HX_VISIT_MEMBER(v17); HX_VISIT_MEMBER(v18); } \
    name(t0 __0,t1 __1,t2 __2,t3 __3,t4 __4,t5 __5,t6 __6,t7 __7,t8 __8,t9 __9,t10 __10,t11 __11,t12 __12,t13 __13,t14 __14,t15 __15,t16 __16,t17 __17,t18 __18) : v0(__0),v1(__1),v2(__2),v3(__3),v4(__4),v5(__5),v6(__6),v7(__7),v8(__8),v9(__9),v10(__10),v11(__11),v12(__12),v13(__13),v14(__14),v15(__15),v16(__16),v17(__17),v18(__18) {}
 
-#define HX_LOCAL_RUN _hx_run
+#if (HXCPP_API_LEVEL>=330)
+  #define HX_LOCAL_RUN _hx_run
+#else
+  #define HX_LOCAL_RUN run
+#endif
 
 #define HX_END_LOCAL_FUNC0(ret) HX_DYNAMIC_CALL0(ret, HX_LOCAL_RUN ) };
 
@@ -986,46 +1025,46 @@ static ::Dynamic __##class##func(const Array< ::Dynamic> &inArgs) \
 
 // For compatibility until next version of haxe is released
 #define HX_BEGIN_LOCAL_FUNC0(name) \
-      HX_BEGIN_LOCAL_FUNC_S0( ::hx::VariadicLocalFunc,name)
+      HX_BEGIN_LOCAL_FUNC_S0( ::hx::LocalFunc,name)
 
 #define HX_BEGIN_LOCAL_FUNC1(name,t0,v0) \
-      HX_BEGIN_LOCAL_FUNC_S1( ::hx::VariadicLocalFunc,name,t0,v0)
+      HX_BEGIN_LOCAL_FUNC_S1( ::hx::LocalFunc,name,t0,v0)
 #define HX_BEGIN_LOCAL_FUNC2(name,t0,v0,t1,v1) \
-      HX_BEGIN_LOCAL_FUNC_S2( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1)
+      HX_BEGIN_LOCAL_FUNC_S2( ::hx::LocalFunc,name,t0,v0,t1,v1)
 #define HX_BEGIN_LOCAL_FUNC3(name,t0,v0,t1,v1,t2,v2) \
-      HX_BEGIN_LOCAL_FUNC_S3( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2)
+      HX_BEGIN_LOCAL_FUNC_S3( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2)
 #define HX_BEGIN_LOCAL_FUNC4(name,t0,v0,t1,v1,t2,v2,t3,v3) \
-      HX_BEGIN_LOCAL_FUNC_S4( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3)
+      HX_BEGIN_LOCAL_FUNC_S4( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3)
 #define HX_BEGIN_LOCAL_FUNC5(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4) \
-      HX_BEGIN_LOCAL_FUNC_S5( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4)
+      HX_BEGIN_LOCAL_FUNC_S5( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4)
 #define HX_BEGIN_LOCAL_FUNC6(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5) \
-      HX_BEGIN_LOCAL_FUNC_S6( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5)
+      HX_BEGIN_LOCAL_FUNC_S6( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5)
 #define HX_BEGIN_LOCAL_FUNC7(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6) \
-      HX_BEGIN_LOCAL_FUNC_S7( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6)
+      HX_BEGIN_LOCAL_FUNC_S7( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6)
 #define HX_BEGIN_LOCAL_FUNC8(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7) \
-      HX_BEGIN_LOCAL_FUNC_S8( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7)
+      HX_BEGIN_LOCAL_FUNC_S8( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7)
 #define HX_BEGIN_LOCAL_FUNC9(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8) \
-      HX_BEGIN_LOCAL_FUNC_S9( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8)
+      HX_BEGIN_LOCAL_FUNC_S9( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8)
 #define HX_BEGIN_LOCAL_FUNC10(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9) \
-      HX_BEGIN_LOCAL_FUNC_S10( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9)
+      HX_BEGIN_LOCAL_FUNC_S10( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9)
 #define HX_BEGIN_LOCAL_FUNC11(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10) \
-      HX_BEGIN_LOCAL_FUNC_S11( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10)
+      HX_BEGIN_LOCAL_FUNC_S11( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10)
 #define HX_BEGIN_LOCAL_FUNC12(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11) \
-      HX_BEGIN_LOCAL_FUNC_S12( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11)
+      HX_BEGIN_LOCAL_FUNC_S12( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11)
 #define HX_BEGIN_LOCAL_FUNC13(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12) \
-      HX_BEGIN_LOCAL_FUNC_S13( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12)
+      HX_BEGIN_LOCAL_FUNC_S13( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12)
 #define HX_BEGIN_LOCAL_FUNC14(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13) \
-      HX_BEGIN_LOCAL_FUNC_S14( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13)
+      HX_BEGIN_LOCAL_FUNC_S14( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13)
 #define HX_BEGIN_LOCAL_FUNC15(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14) \
-      HX_BEGIN_LOCAL_FUNC_S15( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14)
+      HX_BEGIN_LOCAL_FUNC_S15( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14)
 #define HX_BEGIN_LOCAL_FUNC16(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15) \
-      HX_BEGIN_LOCAL_FUNC_S16( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15)
+      HX_BEGIN_LOCAL_FUNC_S16( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15)
 #define HX_BEGIN_LOCAL_FUNC17(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16) \
-      HX_BEGIN_LOCAL_FUNC_S17( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16)
+      HX_BEGIN_LOCAL_FUNC_S17( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16)
 #define HX_BEGIN_LOCAL_FUNC18(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17) \
-      HX_BEGIN_LOCAL_FUNC_S18( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17)
+      HX_BEGIN_LOCAL_FUNC_S18( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17)
 #define HX_BEGIN_LOCAL_FUNC19(name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17,t18,v18) \
-      HX_BEGIN_LOCAL_FUNC_S19( ::hx::VariadicLocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17,t18,v18)
+      HX_BEGIN_LOCAL_FUNC_S19( ::hx::LocalFunc,name,t0,v0,t1,v1,t2,v2,t3,v3,t4,v4,t5,v5,t6,v6,t7,v7,t8,v8,t9,v9,t10,v10,t11,v11,t12,v12,t13,v13,t14,v14,t15,v15,t16,v16,t17,v17,t18,v18)
 
 
 #define HX_DECLARE_DYNAMIC_FUNCTIONS \
@@ -1095,4 +1134,5 @@ static ::Dynamic __##class##func(const Array< ::Dynamic> &inArgs) \
 
 
 #endif
+
 

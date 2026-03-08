@@ -346,6 +346,8 @@ String _hx_std_file_contents_string( String name )
    return String::create(&buffer[0], buffer.size());
 }
 
+
+
 /**
    file_contents : f:string -> string
    <doc>Read the content of the file [f] and return it.</doc>
@@ -377,6 +379,7 @@ Array<unsigned char> _hx_std_file_contents_bytes( String name )
    {
       char *dest = (char *)&buffer[0];
 
+      hx::EnterGCFreeZone();
       int p = 0;
       while( len > 0 )
       {

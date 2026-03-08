@@ -86,38 +86,27 @@ inline bool HxCreateDetachedThread(DWORD (WINAPI *func)(void *), void *param)
 
 struct HxMutex
 {
-   bool mValid;
-   pthread_mutex_t *mMutex;
-
    HxMutex()
    {
       pthread_mutexattr_t mta;
       pthread_mutexattr_init(&mta);
       pthread_mutexattr_settype(&mta, PTHREAD_MUTEX_RECURSIVE);
-      mMutex = new pthread_mutex_t();
-      mValid = pthread_mutex_init(mMutex,&mta) ==0;
+      mValid = pthread_mutex_init(&mMutex,&mta) ==0;
    }
-   ~HxMutex()
-   {
-      Clean();
-   }
-   void Lock() { pthread_mutex_lock(mMutex); }
-   void Unlock() { pthread_mutex_unlock(mMutex); }
-   bool TryLock() { return !pthread_mutex_trylock(mMutex); }
+   ~HxMutex() { if (mValid) pthread_mutex_destroy(&mMutex); }
+   void Lock() { pthread_mutex_lock(&mMutex); }
+   void Unlock() { pthread_mutex_unlock(&mMutex); }
+   bool TryLock() { return !pthread_mutex_trylock(&mMutex); }
    bool IsValid() { return mValid; }
    void Clean()
    {
       if (mValid)
-      {
-         pthread_mutex_destroy(mMutex);
-         mValid = false;
-      }
-      if (mMutex)
-      {
-         delete mMutex;
-         mMutex = nullptr;
-      }
+         pthread_mutex_destroy(&mMutex);
+      mValid = 0;
    }
+
+   bool mValid;
+   pthread_mutex_t mMutex;
 };
 
 #define THREAD_FUNC_TYPE void *
@@ -203,20 +192,18 @@ struct HxSemaphore
 
 struct HxSemaphore
 {
-   HxMutex         mMutex;
-   pthread_cond_t  *mCondition;
-   bool            mSet;
-
-
    HxSemaphore()
    {
       mSet = false;
-      mCondition = new pthread_cond_t();
-      pthread_cond_init(mCondition,0);
+      mValid = true;
+      pthread_cond_init(&mCondition,0);
    }
    ~HxSemaphore()
    {
-      Clean();
+      if (mValid)
+      {
+         pthread_cond_destroy(&mCondition);
+      }
    }
    // For autolock
    inline operator HxMutex &() { return mMutex; }
@@ -226,13 +213,13 @@ struct HxSemaphore
       if (!mSet)
       {
          mSet = true;
-         pthread_cond_signal( mCondition );
+         pthread_cond_signal( &mCondition );
       }
    }
    void QSet()
    {
       mSet = true;
-      pthread_cond_signal( mCondition );
+      pthread_cond_signal( &mCondition );
    }
    void Reset()
    {
@@ -244,14 +231,14 @@ struct HxSemaphore
    {
       AutoLock lock(mMutex);
       while( !mSet )
-         pthread_cond_wait( mCondition, mMutex.mMutex );
+         pthread_cond_wait( &mCondition, &mMutex.mMutex );
       mSet = false;
    }
    // when we already hold the mMutex lock ...
    void QWait()
    {
       while( !mSet )
-         pthread_cond_wait( mCondition, mMutex.mMutex );
+         pthread_cond_wait( &mCondition, &mMutex.mMutex );
       mSet = false;
    }
    // Returns true if the wait was success, false on timeout.
@@ -275,7 +262,7 @@ struct HxSemaphore
 
       int result = 0;
       // Wait for set to be true...
-      while( !mSet &&  (result=pthread_cond_timedwait( mCondition, mMutex.mMutex, &spec )) != ETIMEDOUT)
+      while( !mSet &&  (result=pthread_cond_timedwait( &mCondition, &mMutex.mMutex, &spec )) != ETIMEDOUT)
       {
          if (result!=0)
          {
@@ -300,14 +287,18 @@ struct HxSemaphore
    void Clean()
    {
       mMutex.Clean();
-      if (mCondition)
+      if (mValid)
       {
-         pthread_cond_destroy(mCondition);
-         delete mCondition;
-         mCondition = nullptr;
+         mValid = false;
+         pthread_cond_destroy(&mCondition);
       }
    }
 
+
+   HxMutex         mMutex;
+   pthread_cond_t  mCondition;
+   bool            mSet;
+   bool            mValid;
 };
 
 

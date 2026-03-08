@@ -1,7 +1,4 @@
-import utest.Test;
-import utest.Assert;
-
-class TestTypes extends Test
+class TestTypes extends haxe.unit.TestCase
 {
    var i0:Int = 1;
    var i1:cpp.Int32 = 1;
@@ -33,20 +30,20 @@ class TestTypes extends Test
    public function testConstCharStar()
    {
       var ccs = stringToCcs("hello");
-      Assert.equals( ccsToString(ccs), "hello" );
-      Assert.equals( ccsToStringCast(ccs), "hello" );
+      assertTrue( ccsToString(ccs)=="hello" );
+      assertTrue( ccsToStringCast(ccs)=="hello" );
    }
 
    public function testDynamic()
    {
       var d:Dynamic = this;
-      Assert.equals(d.i0, 1);
-      Assert.equals(d.i1, 1);
-      Assert.equals(d.i2, 1);
-      Assert.equals(d.i3, 1);
-      Assert.equals(d.i4, 1);
-      Assert.equals(d.i5, 1);
-      Assert.equals(d.i6, 1);
-      Assert.equals(d.i7, 1);
+      assertTrue(d.i0==1);
+      assertTrue(d.i1==1);
+      assertTrue(d.i2==1);
+      assertTrue(d.i3==1);
+      assertTrue(d.i4==1);
+      assertTrue(d.i5==1);
+      assertTrue(d.i6==1);
+      assertTrue(d.i7==1);
    }
 }

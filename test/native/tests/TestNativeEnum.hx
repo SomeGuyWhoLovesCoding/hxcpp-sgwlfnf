@@ -1,11 +1,8 @@
 package tests;
 
-import utest.Test;
-import utest.Assert;
-
 // Uses native enum, which does not play nice with Dynamic - must use @:unreflective
 @:unreflective
-#if (haxe_ver >= 4.0) extern enum #else @:extern @:enum #end abstract SystemMetric(SystemMetricImpl) {
+@:enum extern abstract SystemMetric(SystemMetricImpl) {
     @:native("wxSYS_MOUSE_BUTTONS")      var MOUSE_BUTTONS;
     @:native("wxSYS_OS")      var OS;
 }
@@ -16,7 +13,7 @@ extern class SystemMetricImpl { }
 
 
 // Wraps enum in struct, which does play nice...
-#if (haxe_ver >= 4.0) extern enum #else @:extern @:enum #end abstract SystemMetricStruct(SystemMetricStructImpl) {
+@:enum extern abstract SystemMetricStruct(SystemMetricStructImpl) {
     @:native("wxSYS_MOUSE_BUTTONS")      var MOUSE_BUTTONS;
     @:native("wxSYS_OS")      var OS;
 }
@@ -30,7 +27,7 @@ enum wxSystemMetric
    wxSYS_MOUSE_BUTTONS = 27,
 };
 ')
-class TestNativeEnum extends Test
+class TestNativeEnum extends haxe.unit.TestCase
 {
    var x:SystemMetric = SystemMetric.MOUSE_BUTTONS;
    var xStruct:SystemMetricStruct = SystemMetricStruct.MOUSE_BUTTONS;
@@ -48,19 +45,19 @@ class TestNativeEnum extends Test
 
    public function test()
    {
-      Assert.isTrue( isX(SystemMetric.MOUSE_BUTTONS)==true );
-      Assert.isTrue( isX(SystemMetric.OS)==false );
-      Assert.isTrue( isXStruct(SystemMetricStruct.MOUSE_BUTTONS)==true );
-      Assert.isTrue( isXStruct(SystemMetricStruct.OS)==false );
+      assertTrue( isX(SystemMetric.MOUSE_BUTTONS)==true );
+      assertTrue( isX(SystemMetric.OS)==false );
+      assertTrue( isXStruct(SystemMetricStruct.MOUSE_BUTTONS)==true );
+      assertTrue( isXStruct(SystemMetricStruct.OS)==false );
       var d:Dynamic = this;
-      Assert.isNull( d.x );
-      Assert.notNull( d.xStruct );
-      Assert.isNull( d.isX );
-      Assert.notNull( d.isXStruct );
-      var func: (SystemMetricStruct)->Bool = d.isXStruct;
-      Assert.notNull(func);
-      Assert.isTrue(func(SystemMetricStruct.MOUSE_BUTTONS)==true );
-      Assert.isTrue(func(SystemMetricStruct.OS)==false );
+      assertTrue( d.x==null );
+      assertTrue( d.xStruct!=null );
+      assertTrue( d.isX==null );
+      assertTrue( d.isXStruct!=null );
+      var func = d.isXStruct;
+      assertTrue(func!=null);
+      assertTrue(func(SystemMetricStruct.MOUSE_BUTTONS)==true );
+      assertTrue(func(SystemMetricStruct.OS)==false );
    }
 
 }

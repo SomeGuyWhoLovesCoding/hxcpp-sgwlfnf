@@ -1,8 +1,5 @@
 package native;
 
-import utest.Test;
-import utest.Assert;
-
 @:native("ExternStruct")
 extern class ExternStruct
 {
@@ -81,10 +78,10 @@ class MyFinalizable extends cpp.Finalizable
 }
 
 
-class TestFinalizer extends Test
+class TestFinalizer extends haxe.unit.TestCase
 {
 
-   function setup()
+   override public function setup()
    {
       MyFinalizable.count = 0;
       CustomFinalizable.count = 0;
@@ -108,7 +105,7 @@ class TestFinalizer extends Test
           cpp.vm.Gc.run(true);
       }
       Sys.println("\nExtern instances remaining:" + ExternWrapper.instances);
-      Assert.isTrue( ExternWrapper.instances < 10 );
+      assertTrue( ExternWrapper.instances < 10 );
    }
 
    function createCustomFinalizable(i:Int)
@@ -126,7 +123,7 @@ class TestFinalizer extends Test
          createCustomFinalizable(2);
       cpp.vm.Gc.run(true);
       Sys.println("custom cleared:" + CustomFinalizable.count);
-      Assert.isTrue(CustomFinalizable.count>0);
+      assertTrue(CustomFinalizable.count>0);
    }
 
    #end
@@ -145,7 +142,7 @@ class TestFinalizer extends Test
          createMyFinalizable(2);
       cpp.vm.Gc.run(true);
       Sys.println("MyFinalizable cleared:" + MyFinalizable.count);
-      Assert.isTrue(MyFinalizable.count>0);
+      assertTrue(MyFinalizable.count>0);
    }
 }
 

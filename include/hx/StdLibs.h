@@ -43,36 +43,30 @@ Array<unsigned char> __hxcpp_resource_bytes(String inName);
 // System access
 Array<String>  __get_args();
 double         __time_stamp();
-::cpp::Int64   __time_stamp_ms();
 
 HXCPP_EXTERN_CLASS_ATTRIBUTES void __hxcpp_print_string(const String &inV);
 HXCPP_EXTERN_CLASS_ATTRIBUTES void __hxcpp_println_string(const String &inV);
 
-// Optimized: Use overloads instead of templates to reduce code bloat
-inline void __hxcpp_println(int inV) { __hxcpp_println_string(String(inV)); }
-inline void __hxcpp_println(double inV) { __hxcpp_println_string(String(inV)); }
-inline void __hxcpp_println(bool inV) { __hxcpp_println_string(String(inV)); }
-inline void __hxcpp_println(const String &inV) { __hxcpp_println_string(inV); }
-inline void __hxcpp_println(const char *inV) { __hxcpp_println_string(String(inV)); }
-inline void __hxcpp_println(const null &) { __hxcpp_println_string(HX_CSTRING("null")); }
-
-inline void __hxcpp_print(int inV) { __hxcpp_print_string(String(inV)); }
-inline void __hxcpp_print(double inV) { __hxcpp_print_string(String(inV)); }
-inline void __hxcpp_print(bool inV) { __hxcpp_print_string(String(inV)); }
-inline void __hxcpp_print(const String &inV) { __hxcpp_print_string(inV); }
-inline void __hxcpp_print(const char *inV) { __hxcpp_print_string(String(inV)); }
-inline void __hxcpp_print(const null &) { __hxcpp_print_string(HX_CSTRING("null")); }
-
-// Keep Dynamic version for fallback
 template<typename T> inline void __hxcpp_println(T inV)
 {
    Dynamic d(inV);
    __hxcpp_println_string(d);
 }
+// Specialization that does not need dynamic boxing
+template<> inline void __hxcpp_println(String inV)
+{
+   __hxcpp_println_string(inV);
+}
+
 template<typename T> inline void __hxcpp_print(T inV)
 {
    Dynamic d(inV);
    __hxcpp_print_string(d);
+}
+// Specialization that does not need dynamic boxing
+template<> inline void __hxcpp_print(String inV)
+{
+   __hxcpp_print_string(inV);
 }
 
 
@@ -101,14 +95,6 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES void __hxcpp_set_float_format(String inFormat);
 inline int _hx_idiv(int inNum,int inDenom) { return inNum/inDenom; }
 inline int _hx_imod(int inNum,int inDenom) { return inNum%inDenom; }
 inline int _hx_cast_int(int inX) { return inX; }
-
-// Optimized: Use compiler builtins where available
-#ifdef __GNUC__
-#define HX_HAVE_BUILTIN_FAST_FLOOR
-inline int _hx_fast_floor(double inX) {
-   return __builtin_floor(inX);
-}
-#else
 inline int _hx_fast_floor(double inX) {
    union Cast
    {
@@ -119,7 +105,6 @@ inline int _hx_fast_floor(double inX) {
    c.d = (inX-0.5) + 6755399441055744.0;
    return c.l;
 }
-#endif
 
 
 
@@ -176,7 +161,7 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES String __hxcpp_utf8_string_to_char_bytes(String &i
 
 // --- HashRoot ---------------------------------------------------------------------
 
-HXCPP_EXTERN_CLASS_ATTRIBUTES int           __root_hash_size(Dynamic &rtHash);
+HXCPP_EXTERN_CLASS_ATTRIBUTES int           __root_hash_size(Dynamic *rtHash);
 
 // --- IntHash ----------------------------------------------------------------------
 
@@ -487,100 +472,14 @@ inline void* _hx_atomic_compare_exchange_ptr(volatile void **a, void *expected, 
 #elif defined(HX_MSVC_ATOMICS)
   return _InterlockedCompareExchangePointer((void *volatile *)a, replacement, expected);
 #else
-  void *old = *a;
-  if (old == expected) {
-    *a = replacement;
-  }
-  return old;
+   void *old = *a;
+   *a = replacement;
+   return old;
 #endif
 }
 
 inline void* _hx_atomic_compare_exchange_cast_ptr(void *a, void *expected, void *replacement) {
    return _hx_atomic_compare_exchange_ptr((volatile void **)a, expected, replacement);
-}
-
-#include <atomic>
-
-struct AtomicObject: hx::Object {
-  std::atomic< ::hx::Object *> aPtr;
-
-  AtomicObject(Dynamic val) { aPtr = val.mPtr; }
-
-  void __Mark(hx::MarkContext *__inCtx) {
-    Dynamic ptr = load();
-    HX_MARK_MEMBER(ptr);
-  }
-
-#ifdef HXCPP_VISIT_ALLOCS
-   void __Visit(hx::VisitContext *__inCtx) {
-     hx::Object *obj = aPtr.load();
-     HX_VISIT_MEMBER(obj);
-     aPtr.store(obj);
-   }
-#endif
-
-   Dynamic store(Dynamic val) {
-     aPtr.store(val.mPtr);
-     HX_OBJ_WB_GET(this, val.mPtr);
-     return val;
-   }
-
-   Dynamic load() {
-     return aPtr.load();
-   }
-
-   Dynamic exchange(Dynamic val) {
-      Dynamic ret = aPtr.exchange(val.mPtr);
-      HX_OBJ_WB_GET(this, val.mPtr);
-      return ret;
-   }
-
-   Dynamic compareExchange(Dynamic expected, Dynamic replacement) {
-     // Note: using Dynamic instead of hx::Object* is important
-     // Dynamic has an overloaded == operator, a raw pointer to hx::Object does not.
-     Dynamic original = aPtr.load();
-     while (original == expected) {
-       if (aPtr.compare_exchange_weak(original.mPtr, replacement.mPtr)) {
-         HX_OBJ_WB_GET(this, replacement.mPtr);
-         return original;
-       } else {
-         continue;
-       }
-     }
-     return original;
-   }
-};
-
-inline Dynamic __hxcpp_atomic_object_create(Dynamic value) {
-   return new AtomicObject(value);
-}
-
-inline Dynamic __hxcpp_atomic_object_store(Dynamic dynObj, Dynamic val) {
-  AtomicObject *obj = dynamic_cast<AtomicObject *>(dynObj.mPtr);
-  if (!obj)
-    throw HX_INVALID_OBJECT;
-   return obj->store(val);
-}
-
-inline Dynamic __hxcpp_atomic_object_load(Dynamic dynObj) {
-  AtomicObject *obj = dynamic_cast<AtomicObject *>(dynObj.mPtr);
-  if (!obj)
-    throw HX_INVALID_OBJECT;
-   return obj->load();
-}
-
-inline Dynamic __hxcpp_atomic_object_exchange(Dynamic dynObj, Dynamic newVal) {
-  AtomicObject *obj = dynamic_cast<AtomicObject *>(dynObj.mPtr);
-  if (!obj)
-    throw HX_INVALID_OBJECT;
-   return obj->exchange(newVal);
-}
-
-inline Dynamic __hxcpp_atomic_object_compare_exchange(Dynamic dynObj, Dynamic expected, Dynamic replacement) {
-  AtomicObject *obj = dynamic_cast<AtomicObject *>(dynObj.mPtr);
-  if (!obj)
-    throw HX_INVALID_OBJECT;
-  return obj->compareExchange(expected, replacement);
 }
 
 Array<String> __hxcpp_get_call_stack(bool inSkipLast);
@@ -596,46 +495,88 @@ void __hxcpp_stop_profiler();
 
 // --- Memory --------------------------------------------------------------------------
 
-// Optimized: Use templates to reduce code duplication
-template<typename T>
-inline void __hxcpp_align_set(unsigned char *base, int addr, T v) {
+inline void __hxcpp_align_set_float32( unsigned char *base, int addr, float v)
+{
    #ifdef HXCPP_ALIGN_FLOAT
-   if (addr & (sizeof(T)-1)) {
+   if (addr & 3)
+   {
       const unsigned char *src = (const unsigned char *)&v;
       unsigned char *dest = base + addr;
-      for(size_t i = 0; i < sizeof(T); i++) dest[i] = src[i];
-   } else
+      dest[0] = src[0];
+      dest[1] = src[1];
+      dest[2] = src[2];
+      dest[3] = src[3];
+   }
+   else
    #endif
-   *(T*)(base+addr) = v;
+   *(float *)(base+addr) = v;
 }
 
-template<typename T>
-inline T __hxcpp_align_get(unsigned char *base, int addr) {
+
+inline float __hxcpp_align_get_float32( unsigned char *base, int addr)
+{
    #ifdef HXCPP_ALIGN_FLOAT
-   if (addr & (sizeof(T)-1)) {
-      T buf;
+   if (addr & 3)
+   {
+      float buf;
       unsigned char *dest = (unsigned char *)&buf;
       const unsigned char *src = base + addr;
-      for(size_t i = 0; i < sizeof(T); i++) dest[i] = src[i];
+      dest[0] = src[0];
+      dest[1] = src[1];
+      dest[2] = src[2];
+      dest[3] = src[3];
       return buf;
    }
    #endif
-   return *(T*)(base+addr);
+   return *(float *)(base+addr);
 }
 
-// Convenience wrappers
-inline void __hxcpp_align_set_float32(unsigned char *base, int addr, float v) {
-   __hxcpp_align_set<float>(base, addr, v);
+
+inline void __hxcpp_align_set_float64( unsigned char *base, int addr, double v)
+{
+   #ifdef HXCPP_ALIGN_FLOAT
+   if (addr & 3)
+   {
+      unsigned char *dest = base + addr;
+      const unsigned char *src = (const unsigned char *)&v;
+      dest[0] = src[0];
+      dest[1] = src[1];
+      dest[2] = src[2];
+      dest[3] = src[3];
+      dest[4] = src[4];
+      dest[5] = src[5];
+      dest[6] = src[6];
+      dest[7] = src[7];
+   }
+   else
+   #endif
+   *(double *)(base + addr) = v;
 }
-inline float __hxcpp_align_get_float32(unsigned char *base, int addr) {
-   return __hxcpp_align_get<float>(base, addr);
+
+
+inline double __hxcpp_align_get_float64( unsigned char *base, int addr)
+{
+   #ifdef HXCPP_ALIGN_FLOAT
+   if (addr & 3)
+   {
+      double buf;
+      unsigned char *dest = (unsigned char *)&buf;
+      const unsigned char *src = base + addr;
+      dest[0] = src[0];
+      dest[1] = src[1];
+      dest[2] = src[2];
+      dest[3] = src[3];
+      dest[4] = src[4];
+      dest[5] = src[5];
+      dest[6] = src[6];
+      dest[7] = src[7];
+      return buf;
+   }
+   #endif
+   return *(double *)(base+addr);
 }
-inline void __hxcpp_align_set_float64(unsigned char *base, int addr, double v) {
-   __hxcpp_align_set<double>(base, addr, v);
-}
-inline double __hxcpp_align_get_float64(unsigned char *base, int addr) {
-   return __hxcpp_align_get<double>(base, addr);
-}
+
+
 
 
 // Threadsafe methods - takes buffer
@@ -658,17 +599,17 @@ inline float __hxcpp_memory_get_f32(Array<unsigned char> inBuffer ,int addr) {
 
 inline void __hxcpp_memory_set_byte(Array<unsigned char> inBuffer ,int addr,int v) { inBuffer->GetBase()[addr] = v; }
 inline void __hxcpp_memory_set_double(Array<unsigned char> inBuffer ,int addr,double v) {
-   __hxcpp_align_set_float64((unsigned char *)inBuffer->GetBase(), addr, v);
+   return __hxcpp_align_set_float64((unsigned char *)inBuffer->GetBase(), addr,v);
 }
 inline void __hxcpp_memory_set_float(Array<unsigned char> inBuffer ,int addr,float v) {
-   __hxcpp_align_set_float32((unsigned char *)inBuffer->GetBase(), addr, v);
+   return __hxcpp_align_set_float32((unsigned char *)inBuffer->GetBase(), addr,v);
 }
 inline void __hxcpp_memory_set_i16(Array<unsigned char> inBuffer ,int addr,int v) { *(short *)(inBuffer->GetBase()+addr) = v; }
 inline void __hxcpp_memory_set_i32(Array<unsigned char> inBuffer ,int addr,int v) { *(int *)(inBuffer->GetBase()+addr) = v; }
 inline void __hxcpp_memory_set_ui16(Array<unsigned char> inBuffer ,int addr,int v) { *(unsigned short *)(inBuffer->GetBase()+addr) = v; }
 inline void __hxcpp_memory_set_ui32(Array<unsigned char> inBuffer ,int addr,int v) { *(unsigned int *)(inBuffer->GetBase()+addr) = v; }
 inline void __hxcpp_memory_set_f32(Array<unsigned char> inBuffer ,int addr,float v) {
-   __hxcpp_align_set_float32((unsigned char *)inBuffer->GetBase(), addr, v);
+   return __hxcpp_align_set_float32((unsigned char *)inBuffer->GetBase(), addr, v);
 }
 
 
@@ -679,35 +620,23 @@ inline void __hxcpp_memory_clear( ) { __hxcpp_memory = 0; }
 inline void __hxcpp_memory_select( Array<unsigned char> inBuffer )
    { __hxcpp_memory= (unsigned char *)inBuffer->GetBase(); }
 
-// Optimized: Use template wrappers for global memory access
-template<typename T>
-inline T __hxcpp_memory_get(int addr) {
-   return __hxcpp_align_get<T>(__hxcpp_memory, addr);
-}
+inline int __hxcpp_memory_get_byte(int addr) { return __hxcpp_memory[addr]; }
+inline double __hxcpp_memory_get_double(int addr) { return __hxcpp_align_get_float64(__hxcpp_memory,addr); }
+inline float __hxcpp_memory_get_float(int addr) { return __hxcpp_align_get_float32(__hxcpp_memory,addr); }
+inline int __hxcpp_memory_get_i16(int addr) { return *(short *)(__hxcpp_memory+addr); }
+inline int __hxcpp_memory_get_i32(int addr) { return *(int *)(__hxcpp_memory+addr); }
+inline int __hxcpp_memory_get_ui16(int addr) { return *(unsigned short *)(__hxcpp_memory+addr); }
+inline int __hxcpp_memory_get_ui32(int addr) { return *(unsigned int *)(__hxcpp_memory+addr); }
+inline float __hxcpp_memory_get_f32(int addr) { return __hxcpp_align_get_float32(__hxcpp_memory,addr); }
 
-template<typename T>
-inline void __hxcpp_memory_set(int addr, T v) {
-   __hxcpp_align_set<T>(__hxcpp_memory, addr, v);
-}
-
-// Convenience wrappers for common types
-inline int __hxcpp_memory_get_byte(int addr) { return __hxcpp_memory_get<unsigned char>(addr); }
-inline double __hxcpp_memory_get_double(int addr) { return __hxcpp_memory_get<double>(addr); }
-inline float __hxcpp_memory_get_float(int addr) { return __hxcpp_memory_get<float>(addr); }
-inline int __hxcpp_memory_get_i16(int addr) { return __hxcpp_memory_get<short>(addr); }
-inline int __hxcpp_memory_get_i32(int addr) { return __hxcpp_memory_get<int>(addr); }
-inline int __hxcpp_memory_get_ui16(int addr) { return __hxcpp_memory_get<unsigned short>(addr); }
-inline int __hxcpp_memory_get_ui32(int addr) { return __hxcpp_memory_get<unsigned int>(addr); }
-inline float __hxcpp_memory_get_f32(int addr) { return __hxcpp_memory_get<float>(addr); }
-
-inline void __hxcpp_memory_set_byte(int addr,int v) { __hxcpp_memory_set<unsigned char>(addr, (unsigned char)v); }
-inline void __hxcpp_memory_set_double(int addr,double v) { __hxcpp_memory_set<double>(addr, v); }
-inline void __hxcpp_memory_set_float(int addr,float v) { __hxcpp_memory_set<float>(addr, v); }
-inline void __hxcpp_memory_set_i16(int addr,int v) { __hxcpp_memory_set<short>(addr, (short)v); }
-inline void __hxcpp_memory_set_i32(int addr,int v) { __hxcpp_memory_set<int>(addr, v); }
-inline void __hxcpp_memory_set_ui16(int addr,int v) { __hxcpp_memory_set<unsigned short>(addr, (unsigned short)v); }
-inline void __hxcpp_memory_set_ui32(int addr,int v) { __hxcpp_memory_set<unsigned int>(addr, (unsigned int)v); }
-inline void __hxcpp_memory_set_f32(int addr,float v) { __hxcpp_memory_set<float>(addr, v); }
+inline void __hxcpp_memory_set_byte(int addr,int v) { __hxcpp_memory[addr] = v; }
+inline void __hxcpp_memory_set_double(int addr,double v) { __hxcpp_align_set_float64(__hxcpp_memory,addr,v); }
+inline void __hxcpp_memory_set_float(int addr,float v) { __hxcpp_align_set_float32(__hxcpp_memory,addr,v); }
+inline void __hxcpp_memory_set_i16(int addr,int v) { *(short *)(__hxcpp_memory+addr) = v; }
+inline void __hxcpp_memory_set_i32(int addr,int v) { *(int *)(__hxcpp_memory+addr) = v; }
+inline void __hxcpp_memory_set_ui16(int addr,int v) { *(unsigned short *)(__hxcpp_memory+addr) = v; }
+inline void __hxcpp_memory_set_ui32(int addr,int v) { *(unsigned int *)(__hxcpp_memory+addr) = v; }
+inline void __hxcpp_memory_set_f32(int addr,float v) { __hxcpp_align_set_float32(__hxcpp_memory,addr,v); }
 
 // FPHelper conversion
 
@@ -791,8 +720,7 @@ inline ::Array<unsigned char> _hx_nsdata_to_bytes(NSData *inData)
 #endif
 #endif
 
-// Remove duplicate declaration
-// HXCPP_EXTERN_CLASS_ATTRIBUTES Dynamic _hx_regexp_new_options(String s, String options);
+HXCPP_EXTERN_CLASS_ATTRIBUTES Dynamic _hx_regexp_new_options(String s, String options);
 
 // EReg.hx -> src/hx/libs/regexp/RegExp.cpp
 HXCPP_EXTERN_CLASS_ATTRIBUTES Dynamic _hx_regexp_new_options(String s, String options);

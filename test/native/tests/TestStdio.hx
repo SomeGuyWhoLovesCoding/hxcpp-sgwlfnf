@@ -1,12 +1,8 @@
 package tests;
-
-import utest.Test;
-import utest.Assert;
 import cpp.Stdio;
-
 using cpp.NativeArray;
 
-class TestStdio extends Test
+class TestStdio extends haxe.unit.TestCase
 {
    public function test()
    {
@@ -20,7 +16,7 @@ class TestStdio extends Test
       var input = new haxe.io.BytesInput(bytes);
       var val = input.readInt32();
 
-      Assert.equals(val, ints[0]);
+      assertTrue(val==ints[0]);
    }
 }
 

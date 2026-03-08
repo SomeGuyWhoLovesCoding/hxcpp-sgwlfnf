@@ -1,4 +1,4 @@
--p src
--m TestMain
--L utest
---neko bin/neko/TestMain.n
+-cp src
+-main TestMain
+-neko bin/neko/TestMain.n
+-cp ../unit
