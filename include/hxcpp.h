@@ -68,12 +68,7 @@
    #define HXCPP_ALIGN_FLOAT
 #endif
 
-// Must allign allocs to 8 bytes to match floating point requirement?
-// Ints must br read on 4-byte boundary
-#if defined(EMSCRIPTEN) || defined(GCW0)
-   #define HXCPP_ALIGN_ALLOC
-#endif
-
+#define HXCPP_ALIGN_ALLOC
 
 
 // Some compilers are over-enthusiastic about what they #define ...
@@ -214,10 +209,6 @@ typedef char HX_CHAR;
 // HXCPP includes...
 
 // Basic mapping from haxe -> c++
-#if (HXCPP_API_LEVEL<=330)
-typedef int Int;
-typedef bool Bool;
-#endif
 
 #ifdef HXCPP_FLOAT32
 typedef float Float;
@@ -264,6 +255,13 @@ namespace hx { template<typename O> class ObjectPtr; }
 namespace cpp { template<typename S,typename H> class Struct; }
 namespace cpp { template<typename T> class Pointer; }
 namespace cpp { template<typename T> class Function; }
+namespace cpp { namespace marshal { template<class T> class Boxed_obj; } }
+namespace cpp { namespace marshal { template<class T> using Boxed =::hx::ObjectPtr<Boxed_obj<T>>; } }
+namespace cpp { namespace marshal { template<class T> class ValueType; } }
+namespace cpp { namespace marshal { template<class T> class ValueReference; } }
+namespace cpp { namespace marshal { template<class T> class PointerType; } }
+namespace cpp { namespace marshal { template<class T> class PointerReference; } }
+namespace cpp { namespace marshal { template<class T> class View; } }
 template<typename ELEM_> class Array_obj;
 template<typename ELEM_> class Array;
 namespace hx {
@@ -276,12 +274,6 @@ namespace cpp {
      class VirtualArray;
      class CppInt32__;
 }
-
-
-#if (HXCPP_API_LEVEL < 320) && !defined(__OBJC__)
-typedef hx::Class Class;
-typedef hx::Class_obj Class_obj;
-#endif
 
 class Dynamic;
 class String;
@@ -306,11 +298,7 @@ public:
    virtual void visitAlloc(void **ioPtr)=0;
 };
 
-#if (HXCPP_API_LEVEL >= 330)
 typedef ::cpp::Variant Val;
-#else
-typedef ::Dynamic Val;
-#endif
 
 #ifdef HXCPP_GC_GENERATIONAL
   #define HXCPP_GC_NURSERY
@@ -319,7 +307,6 @@ typedef ::Dynamic Val;
 
 //#define HXCPP_COMBINE_STRINGS
 
-#if (HXCPP_API_LEVEL >= 313)
 enum PropertyAccessMode
 {
    paccNever   = 0,
@@ -327,15 +314,9 @@ enum PropertyAccessMode
    paccAlways  = 2,
 };
 typedef PropertyAccessMode PropertyAccess;
-#define HX_PROP_NEVER  hx::paccNever
-#define HX_PROP_DYNAMIC hx::paccDynamic
-#define HX_PROP_ALWAYS hx::paccAlways
-#else
-typedef bool PropertyAccess;
-#define HX_PROP_NEVER  false
-#define HX_PROP_DYNAMIC true
-#define HX_PROP_ALWAYS true
-#endif
+#define HX_PROP_NEVER ::hx::paccNever
+#define HX_PROP_DYNAMIC ::hx::paccDynamic
+#define HX_PROP_ALWAYS ::hx::paccAlways
 
 } // end namespace hx
 
@@ -358,6 +339,7 @@ typedef bool PropertyAccess;
 #include <cpp/CppInt32__.h>
 // This needs to "see" other declarations ...
 #include <hx/GcTypeInference.h>
+#include <hx/Functions.h>
 #include <hx/FieldRef.h>
 #include "Array.h"
 #include <hx/Anon.h>
@@ -370,19 +352,28 @@ typedef bool PropertyAccess;
 #endif
 #include <hx/StdLibs.h>
 #include <cpp/Pointer.h>
+#include <cpp/marshal/Boxed.hpp>
+#include <cpp/marshal/ValueType.hpp>
+#include <cpp/marshal/PointerType.hpp>
+#include <cpp/marshal/ValueReference.hpp>
+#include <cpp/marshal/PointerReference.hpp>
+#include <cpp/marshal/View.hpp>
+#include <cpp/marshal/Marshal.hpp>
+#include <cpp/marshal/RootHandle.hpp>
+#include <cpp/encoding/Ascii.hpp>
+#include <cpp/encoding/Utf8.hpp>
+#include <cpp/encoding/Utf16.hpp>
 #include <hx/Native.h>
 #include <hx/Operators.h>
-#include <hx/Functions.h>
+#if (HXCPP_API_LEVEL>=500)
+#include <hx/Invoker.h>
+#endif
 // second time ...
 #include <cpp/Variant.h>
 #include <hx/Debug.h>
 #include <hx/Boot.h>
 #include <hx/Undefine.h>
-#if (HXCPP_API_LEVEL>=330)
 #include <hx/LessThanEq.h>
-#else
-#include <cpp/Int64.h>
-#endif
 
 #endif
 

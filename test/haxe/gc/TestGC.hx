@@ -1,4 +1,7 @@
 package gc;
+
+import utest.Test;
+import utest.Assert;
 import haxe.io.Bytes;
 import cpp.vm.Gc;
 
@@ -6,7 +9,7 @@ class CustomObject {
 	public function new():Void {}
 }
 
-class TestGC extends haxe.unit.TestCase {
+class TestGC extends Test {
 	function createDummy(val:Dynamic):Dynamic {
       return { dummy: val };
    }
@@ -31,17 +34,22 @@ class TestGC extends haxe.unit.TestCase {
       return clearStack(count-1);
    }
 
+   // NOTE : previously the objects below were created in the same thread as the assertions and the clear
+   // stack function above attempted to remove references to it so it was eligable for collection.
+   // With the callable changes it seems clang can do some more aggressive optimisations which broke these tests,
+   // so now the objects are created on a separate thread and we sleep for 1s to give time for the threads to exit and unregister from the GC.
 
 	function createAbc():Void {
 		var object = { test: "abc" };
 		Gc.doNotKill(object);
 	}
 	public function testObject():Void {
-		create(createAbc);
-		var zombie = gc();
-		assertTrue(zombie != null);
-		assertEquals("abc", zombie.test);
-		assertTrue(gc() == null);
+		sys.thread.Thread.create(createAbc);
+		Sys.sleep(1);
+		var zombie:Dynamic = gc();
+		Assert.notNull(zombie);
+		Assert.equals("abc", zombie.test);
+		Assert.isNull(gc());
 	}
 
    // Null<int> for numbers < 256 are special cases
@@ -65,11 +73,12 @@ class TestGC extends haxe.unit.TestCase {
 		Gc.doNotKill(object);
 	};
 	public function testFunc():Void {
-		create(createFunction);
-		var zombie = gc();
-		assertTrue(zombie != null);
-		assertEquals("abc", zombie());
-		assertTrue(gc() == null);
+		sys.thread.Thread.create(createFunction);
+		Sys.sleep(1);
+		var zombie:Dynamic = gc();
+		Assert.notNull(zombie);
+		Assert.equals("abc", zombie());
+		Assert.isNull(gc());
 	}
 
 	function createCustom():Void {
@@ -77,11 +86,12 @@ class TestGC extends haxe.unit.TestCase {
 		Gc.doNotKill(object);
 	};
 	public function testCustomObject():Void {
-		create(createCustom);
+		sys.thread.Thread.create(createCustom);
+		Sys.sleep(1);
 		var zombie = gc();
-		assertTrue(zombie != null);
-		assertTrue(Std.isOfType(zombie, CustomObject));
-		assertTrue(gc() == null);
+		Assert.notNull(zombie);
+		Assert.isOfType(zombie, CustomObject);
+		Assert.isNull(gc());
 	}
 
 	function createBytes():Void {
@@ -89,41 +99,42 @@ class TestGC extends haxe.unit.TestCase {
 		Gc.doNotKill(object);
 	};
 	public function testBytes():Void {
-		create(createBytes);
+		sys.thread.Thread.create(createBytes);
+		Sys.sleep(1);
 		var zombie = gc();
-		assertTrue(zombie != null);
-		assertTrue(Std.isOfType(zombie, Bytes));
-		assertTrue(gc() == null);
+		Assert.notNull(zombie);
+		Assert.isOfType(zombie, Bytes);
+		Assert.isNull(gc());
 	}
 
 	public function testBigStack():Void {
-      assertTrue( TestBigStack.test() );
-   }
+		Assert.isTrue( TestBigStack.test() );
+   	}
 
    #if !cppia
 	public function testConstStrings():Void {
-      // Const strings void Gc overhead
-      var strings = new Array<String>();
-      strings.push( haxe.Resource.getString("TestMain.hx") );
-      strings.push( "some string" );
-      var chars = "abc123";
-      // Optimization for single chars...
-      for(c in 0...chars.length)
-         strings.push( chars.substr(c,1) );
-      for(string in strings)
-         assertTrue( untyped __global__.__hxcpp_is_const_string(string) );
-      Gc.run(true);
-      for(string in strings)
-         assertTrue( untyped __global__.__hxcpp_is_const_string(string) );
+		// Const strings void Gc overhead
+		var strings = new Array<String>();
+		strings.push( haxe.Resource.getString("TestMain.hx") );
+		strings.push( "some string" );
+		var chars = "abc123";
+		// Optimization for single chars...
+		for(c in 0...chars.length)
+		strings.push( chars.substr(c,1) );
+		for(string in strings)
+		Assert.isTrue( untyped __global__.__hxcpp_is_const_string(string) );
+		Gc.run(true);
+		for(string in strings)
+		Assert.isTrue( untyped __global__.__hxcpp_is_const_string(string) );
 
-      var strings = new Array<String>();
-      strings.push( haxe.Resource.getString("TestMain.hx").substr(10) );
-      strings.push( "some string" + chars );
-      for(c in 0...chars.length-1)
-         strings.push( chars.substr(c,2) );
+		var strings = new Array<String>();
+		strings.push( haxe.Resource.getString("TestMain.hx").substr(10) );
+		strings.push( "some string" + chars );
+		for(c in 0...chars.length-1)
+			strings.push( chars.substr(c,2) );
 
-      for(string in strings)
-         assertFalse( untyped __global__.__hxcpp_is_const_string(string) );
+		for(string in strings)
+			Assert.isFalse( untyped __global__.__hxcpp_is_const_string(string) );
    }
    #end
 }

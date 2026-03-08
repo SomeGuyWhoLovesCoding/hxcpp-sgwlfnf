@@ -1,6 +1,8 @@
--main CppiaHost
+-m CppiaHost
+HostExtendedRoot
 -D scriptable
 -D dll_export=host_classes.info
--dce no
--cpp bin
--cp ../unit
+-L utest
+--dce no
+--cpp bin
+-D HXCPP_CATCH_SEGV

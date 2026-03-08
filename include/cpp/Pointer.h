@@ -131,11 +131,14 @@ public:
    // This allows 'StaticCast' to be used from arrays
    typedef Dynamic Ptr;
 
-   inline Struct( ) {  }
+   inline Struct( ) : value() {  }
    inline Struct( const T &inRHS ) : value(inRHS) {  }
    inline Struct( const null &) { value = T(); }
    inline Struct( const Reference<T> &);
    inline Struct( const Dynamic &inRHS) { fromDynamic(inRHS.mPtr); }
+
+   template<class... TArgs>
+   Struct(TArgs... args) : value(std::forward<TArgs>(args)...) {}
 
    inline Struct<T,HANDLER> &operator=( const T &inRHS ) { value = inRHS; return *this; }
    inline Struct<T,HANDLER> &operator=( const null & ) { value = T(); return *this; }
@@ -151,10 +154,8 @@ public:
    }
    operator String() const { return HANDLER::toString(&value); }
 
-   #if (HXCPP_API_LEVEL >= 330)
    inline Struct( const hx::Val &inRHS) { fromDynamic(inRHS.asObject()); }
    operator hx::Val() const { return operator Dynamic(); }
-   #endif
 
    bool operator==(const Struct<T,HANDLER> &inRHS) const { return value==inRHS.value; }
    bool operator==(const null &inRHS) const { return false; }
@@ -214,6 +215,7 @@ public:
       hx::Object *obj = inVariant.asObject();
       ptr = obj  ? (T*)inVariant.valObject->__GetHandle() : 0;
    }
+   inline Pointer(const ::cpp::marshal::PointerReference<T>);
 
    template<typename O>
    inline Pointer( const O *inValue ) : ptr( (T*) inValue) { }
@@ -274,9 +276,7 @@ public:
    inline T &set_ref(const T &inValue) { return *ptr = inValue;  }
 
    operator Dynamic () const { return CreateDynamicPointer((void *)ptr); }
-   #if (HXCPP_API_LEVEL >= 330)
    operator cpp::Variant () const { return CreateDynamicPointer((void *)ptr); }
-   #endif
 
    operator T * () { return ptr; }
    T * get_raw() { return ptr; }
@@ -513,6 +513,11 @@ public:
    }
 
 
+    template<typename T>
+    inline static Pointer<T> addressOf(const ::cpp::marshal::ValueReference<T>&);
+
+    template<typename T>
+    inline static Pointer<T*> addressOf(const ::cpp::marshal::PointerReference<T>&);
 
    template<typename T>
 	inline static Pointer<T> addressOf(T &value)  { return Pointer<T>(&value); }

@@ -1,4 +1,4 @@
--cpp bin
--main Native
--D HXCPP_DEBUGGER
--cp ../unit
+-m Native
+-L utest
+-D HXCPP-DEBUGGER
+--cpp bin

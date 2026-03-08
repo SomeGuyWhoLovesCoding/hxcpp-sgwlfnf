@@ -95,39 +95,58 @@ void Anon_obj::__Visit(hx::VisitContext *__inCtx)
 }
 #endif
 
-// findFixedWithHash: core lookup used by all field-access paths.
-//
-// Takes a pre-computed hash to avoid redundant hash() calls. The old
-// findFixed() called inKey.hash() internally, and __Field duplicated
-// the hash computation again in its unrolled fast path, meaning every
-// field access computed the string hash at least twice (and three times
-// for objects with >4 fixed fields, where __Field fell through to
-// findFixed for slots 5+). Now hash is computed exactly once per access
-// by the caller and passed in here.
-//
-// The pointer-identity shortcut (const-alloc mark bit) is preserved as
-// the fastest path: compiled field name literals are GC-const-allocated,
-// so their pointer is stable and a simple == comparison suffices without
-// hashing at all.
-inline int Anon_obj::findFixedWithHash(const ::String &inKey, int sought, int inStart)
+inline int Anon_obj::findFixed(const ::String &inKey, bool inSkip5)
 {
+   if (!mFixedFields || !inKey.isAsciiEncoded() )
+      return -1;
    VariantKey *fixed = getFixed();
 
-   // Binary search over the hash-sorted fixed field array (only for 5+
-   // fields; the linear path below handles the common small-object case).
-   int min = inStart;
-   int max = mFixedFields;
-
-   if (fixed[min].hash > sought)
-      return -1;
-   if (fixed[max-1].hash < sought)
-      return -1;
-
-   if (fixed[min].hash != sought)
-   {
-      while (max > min+1)
+   if (!inSkip5)
+      if (inKey.__s[HX_GC_CONST_ALLOC_MARK_OFFSET]  & HX_GC_CONST_ALLOC_MARK_BIT)
       {
-         int mid = (max+min) >> 1;
+         for(int i=0;i<mFixedFields;i++)
+         {
+            if (fixed[i].key.__s == inKey.__s)
+            return i;
+         }
+      }
+
+
+   int sought = inKey.hash();
+
+   if (!inSkip5)
+   {
+      if (mFixedFields<5)
+      {
+         for(int i=0;i<mFixedFields;i++)
+            if (fixed[i].hash==sought && (
+                   (fixed[i].key.length == inKey.length && !memcmp(fixed[i].key.raw_ptr(),inKey.raw_ptr(), inKey.length))))
+               return i;
+         return -1;
+      }
+   }
+
+   // Find node with same hash...
+   /* hash example
+      [0] = -3  <- min
+      [1] = -1
+      [2] = -1   (sought -1)
+      [3] =  4
+      [4] =  4  <- max
+   */
+
+   int min = inSkip5 ? 5 : 0;
+   if (fixed[min].hash>sought)
+      return -1;
+   if (fixed[min].hash!=sought)
+   {
+      int max = mFixedFields;
+      if (fixed[max-1].hash<sought)
+         return -1;
+
+      while(max>min+1)
+      {
+         int mid = (max+min)>>1;
          if (fixed[mid].hash <= sought)
             min = mid;
          else
@@ -135,103 +154,94 @@ inline int Anon_obj::findFixedWithHash(const ::String &inKey, int sought, int in
       }
    }
 
-   while (fixed[min].hash == sought)
+   while(fixed[min].hash==sought)
    {
-      if (fixed[min].key.length == inKey.length &&
-          !memcmp(fixed[min].key.raw_ptr(), inKey.raw_ptr(), inKey.length))
+      // Might be multiple?
+      if ( fixed[min].key.length == inKey.length && !memcmp(fixed[min].key.raw_ptr(),inKey.raw_ptr(), inKey.length))
          return min;
-      if (++min >= mFixedFields)
+
+      min++;
+      if (min>=mFixedFields)
          break;
    }
 
    return -1;
 }
 
-// findFixed: public entry point, computes hash once then delegates.
-inline int Anon_obj::findFixed(const ::String &inKey, bool /*inSkip5_unused*/)
-{
-   if (!mFixedFields || !inKey.isAsciiEncoded())
-      return -1;
-
-   // Pointer-identity fast path for GC-const-allocated (compiled) strings.
-   VariantKey *fixed = getFixed();
-   if (inKey.__s[HX_GC_CONST_ALLOC_MARK_OFFSET] & HX_GC_CONST_ALLOC_MARK_BIT)
-   {
-      for (int i = 0; i < mFixedFields; i++)
-         if (fixed[i].key.__s == inKey.__s)
-            return i;
-   }
-
-   return findFixedWithHash(inKey, inKey.hash(), 0);
-}
-
 hx::Val Anon_obj::__Field(const String &inName, hx::PropertyAccess inCallProp)
 {
+
    #ifdef HX_SMART_STRINGS
    if (inName.isAsciiEncodedQ())
    #endif
-   if (mFixedFields > 0)
+   if (mFixedFields>0)
    {
       VariantKey *fixed = getFixed();
-
-      // Pointer-identity fast path: compiled field name literals are
-      // GC-const-allocated so their char pointer is unique and stable.
-      if (inName.__s[HX_GC_CONST_ALLOC_MARK_OFFSET] & HX_GC_CONST_ALLOC_MARK_BIT)
+      if (inName.__s[HX_GC_CONST_ALLOC_MARK_OFFSET]  & HX_GC_CONST_ALLOC_MARK_BIT)
       {
-         for (int i = 0; i < mFixedFields; i++)
+         for(int i=0;i<mFixedFields;i++)
+         {
             if (fixed[i].key.__s == inName.__s)
                return fixed[i].value;
+         }
       }
 
-      // Compute hash exactly once, then do a single linear scan for
-      // objects with <=4 fixed fields (the overwhelmingly common case in
-      // practice — the benchmark's 5-field objects previously fell off
-      // the end of the unrolled chain and re-entered findFixed, computing
-      // the hash a second time before starting the binary search).
       int hash = inName.hash();
-
-      if (mFixedFields < 5)
+      if (fixed->hash==hash && HX_QSTR_EQ_AE(fixed->key,inName))
+         return fixed->value;
+      if (mFixedFields>1)
       {
-         for (int i = 0; i < mFixedFields; i++)
-            if (fixed[i].hash == hash && HX_QSTR_EQ_AE(fixed[i].key, inName))
-               return fixed[i].value;
-      }
-      else
-      {
-         // Unrolled check for slots 0-4, then binary search for the rest —
-         // hash already computed above, no second call needed.
-         for (int i = 0; i < 5; i++)
-            if (fixed[i].hash == hash && HX_QSTR_EQ_AE(fixed[i].key, inName))
-               return fixed[i].value;
+         fixed++;
+         if (fixed->hash==hash && HX_QSTR_EQ_AE(fixed->key,inName))
+           return fixed->value;
+         if (mFixedFields>2)
+         {
+            fixed++;
+            if (fixed->hash==hash && HX_QSTR_EQ_AE(fixed->key,inName))
+              return fixed->value;
+            if (mFixedFields>3)
+            {
+               fixed++;
+               if (fixed->hash==hash && HX_QSTR_EQ_AE(fixed->key,inName))
+                 return fixed->value;
+               if (mFixedFields>4)
+               {
+                  fixed++;
+                  if (fixed->hash==hash && HX_QSTR_EQ_AE(fixed->key,inName))
+                     return fixed->value;
 
-         int slot = findFixedWithHash(inName, hash, 5);
-         if (slot >= 0)
-            return fixed[slot].value;
+                  int fixed = findFixed(inName,true);
+                  if (fixed>=0)
+                     return getFixed()[fixed].value;
+               }
+            }
+         }
       }
    }
+
 
    if (!mFields.mPtr)
       return hx::Val();
 
-   return __string_hash_get(mFields, inName);
+   return __string_hash_get(mFields,inName);
 }
 
 bool Anon_obj::__HasField(const String &inName)
 {
-   if (findFixed(inName) >= 0)
+   if (findFixed(inName)>=0)
       return true;
    if (!mFields.mPtr)
       return false;
-   return __string_hash_exists(mFields, inName);
+   return __string_hash_exists(mFields,inName);
 }
 
 bool Anon_obj::__Remove(String inKey)
 {
    int slot = findFixed(inKey);
-   if (slot >= 0)
+   if (slot>=0)
    {
       VariantKey *fixed = getFixed();
-      while (slot < mFixedFields)
+      while(slot<mFixedFields)
       {
          fixed[slot] = fixed[slot+1];
          slot++;
@@ -242,49 +252,34 @@ bool Anon_obj::__Remove(String inKey)
 
    if (!mFields.mPtr)
       return false;
-   return __string_hash_remove(mFields, inKey);
+   return __string_hash_remove(mFields,inKey);
 }
 
 
-hx::Val Anon_obj::__SetField(const String &inName, const hx::Val &inValue, hx::PropertyAccess inCallProp)
+hx::Val Anon_obj::__SetField(const String &inName,const hx::Val &inValue, hx::PropertyAccess inCallProp)
 {
-   // Compute hash once and reuse across pointer-identity check and slot
-   // search. The old code called findFixed() which recomputed the hash
-   // internally, independent of anything __Field might have already done.
-   int slot = -1;
-   if (mFixedFields > 0 && inName.isAsciiEncoded())
-   {
-      VariantKey *fixed = getFixed();
-      if (inName.__s[HX_GC_CONST_ALLOC_MARK_OFFSET] & HX_GC_CONST_ALLOC_MARK_BIT)
-      {
-         for (int i = 0; i < mFixedFields; i++)
-            if (fixed[i].key.__s == inName.__s)
-               { slot = i; break; }
-      }
-      if (slot < 0)
-         slot = findFixedWithHash(inName, inName.hash(), 0);
-   }
-
-   if (slot >= 0)
+   int slot = findFixed(inName);
+   if (slot>=0)
    {
       #ifdef HXCPP_GC_GENERATIONAL
       VariantKey *fixed = getFixed() + slot;
-      fixed->value = inValue;
+      fixed->value=inValue;
       if (fixed->value.type <= cpp::Variant::typeString)
          HX_OBJ_WB_GET(this, fixed->value.valObject);
       #else
-      getFixed()[slot].value = inValue;
+      getFixed()[slot].value=inValue;
       #endif
       return inValue;
    }
 
+   // TODO - fixed
    if (!mFields.mPtr)
    {
       mFields = hx::FieldMapCreate();
       HX_OBJ_WB_GET(this, mFields.mPtr);
    }
 
-   __string_hash_set(HX_MAP_THIS_ mFields, inName, inValue, true);
+   __string_hash_set(HX_MAP_THIS_ mFields,inName,inValue,true);
    return inValue;
 }
 
@@ -450,3 +445,5 @@ bool __hxcpp_anon_remove(Dynamic inObj,String inKey)
       return __string_hash_remove(*map,inKey);
    return false;
 }
+
+

@@ -73,7 +73,7 @@
    // Newer code will use the HX_STACKFRAME macro
    #define HX_STACKFRAME(pos) ::hx::StackFrame _hx_stackframe(pos);
    #define HX_GC_STACKFRAME(pos) ::hx::StackFrame _hx_stackframe(pos);
-
+   
    // Must record the stack state at the catch
    #define HX_STACK_BEGIN_CATCH __hxcpp_stack_begin_catch();
    #define HX_JUST_GC_STACKFRAME ::hx::JustGcStackFrame _hx_stackframe;
@@ -116,7 +116,7 @@
        ::hx::StackVariable __stackvariable_##cpp_var(_hx_stackframe.variables, false, haxe_name, &cpp_var);
 
    #define HX_STACK_CATCHABLE(T, n)                                        \
-       hx::StackCatchable __stackcatchable_##n                             \
+       ::hx::StackCatchable __stackcatchable_##n                             \
            (_hx_stackframe, reinterpret_cast<T *>(&_hx_stackframe));
 
    // If HXCPP_DEBUGGER is enabled, then a throw is checked to see if it
@@ -335,13 +335,7 @@ struct ExceptionStackFrame
    int line;
    #endif
 
-   #if HXCPP_API_LEVEL > 330
    const hx::StackPosition *position;
-   #else
-   const char *className;
-   const char *functionName;
-   const char *fileName;
-   #endif
 
    ExceptionStackFrame(const StackFrame &inFrame);
    ::String format(bool inForDisplay);

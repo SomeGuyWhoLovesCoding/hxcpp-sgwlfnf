@@ -109,6 +109,8 @@ namespace cpp
       inline operator unsigned char () const { return asInt(); }
       inline operator char () const { return asInt(); }
       inline operator signed char () const { return asInt(); }
+      inline operator char16_t() const { return asInt(); }
+      inline operator char32_t() const { return asInt(); }
       inline operator cpp::Int64 () const { return asInt64(); }
       inline operator cpp::UInt64 () const { return asInt64(); }
       inline bool operator !() const { return !asInt(); }
@@ -149,12 +151,14 @@ namespace cpp
       inline bool operator!=(const Variant &inRHS) const { return !operator==(inRHS); }
       inline bool operator!=(const String &inRHS)  const;
 
-
       template<typename RETURN_>
       RETURN_ Cast() const { return RETURN_(*this); }
 
       void CheckFPtr();
+
+#if (HXCPP_API_LEVEL<500)
       HX_DECLARE_VARIANT_FUNCTIONS
+#endif
 
 
     // Operator + is different, since it must consider strings too...
@@ -168,6 +172,11 @@ namespace cpp
     inline double operator++(int) {double val = asDouble(); set(val+1); return val; }
     inline double operator--() { return set(asDouble()-1); }
     inline double operator--(int) {double val = asDouble(); set(val-1); return val; }
+
+#if (HXCPP_API_LEVEL>=500)
+    template<class... TArgs>
+    inline Dynamic operator()(const TArgs&... args);
+#endif
 
     template<typename T>
     inline double operator / (const T &inRHS) const { return asDouble() / (double)inRHS; } \
@@ -197,8 +206,8 @@ namespace cpp
 
    #define HX_VARIANT_COMPARE_OP( op ) \
    inline bool operator op (double inRHS)  const { return isNumeric() && (asDouble() op inRHS); } \
-   inline bool operator op (cpp::Int64 inRHS)  const { return isNumeric() && (asInt64() op inRHS); } \
-   inline bool operator op (cpp::UInt64 inRHS)  const { return isNumeric() && ((cpp::UInt64)(asInt64()) op inRHS); } \
+   inline bool operator op (::cpp::Int64 inRHS)  const { return isNumeric() && (asInt64() op inRHS); } \
+   inline bool operator op (::cpp::UInt64 inRHS)  const { return isNumeric() && ((::cpp::UInt64)(asInt64()) op inRHS); } \
    inline bool operator op (float inRHS)  const { return isNumeric() && (asDouble() op inRHS); } \
    inline bool operator op (int inRHS)  const { return isNumeric() && (asDouble() op (double)inRHS); } \
    inline bool operator op (unsigned int inRHS)  const { return isNumeric() && (asDouble() op (double)inRHS); } \
@@ -206,12 +215,14 @@ namespace cpp
    inline bool operator op (unsigned short inRHS)  const { return isNumeric() && (asDouble() op (double)inRHS); } \
    inline bool operator op (signed char inRHS)  const { return isNumeric() && (asDouble() op (double)inRHS); } \
    inline bool operator op (unsigned char inRHS)  const { return isNumeric() && (asDouble() op (double)inRHS); } \
+   inline bool operator op (char16_t inRHS)  const { return isNumeric() && (asDouble() op (double)inRHS); } \
+   inline bool operator op (char32_t inRHS)  const { return isNumeric() && (asDouble() op (double)inRHS); } \
    inline bool operator op (bool inRHS)  const { return isBool() && (asDouble() op (double)inRHS); } \
-   inline bool operator op (const Dynamic &inRHS)  const { return Compare(inRHS) op 0; } \
+   inline bool operator op (const ::Dynamic &inRHS)  const { return Compare(inRHS) op 0; } \
 
    #define HX_VARIANT_COMPARE_OP_ALL( op ) \
-      inline bool operator op (const null &inRHS)  const { return false; } \
-      inline bool operator op (const cpp::Variant &inRHS)  const { return Compare(inRHS) op 0; } \
+      inline bool operator op (const ::null &inRHS)  const { return false; } \
+      inline bool operator op (const ::cpp::Variant &inRHS)  const { return Compare(inRHS) op 0; } \
       HX_VARIANT_COMPARE_OP(op)
 
    HX_VARIANT_COMPARE_OP( == )
@@ -272,16 +283,18 @@ namespace cpp
 
 
 #define HX_ARITH_VARIANT( op ) \
-   inline double operator op (const double &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS;} \
-   inline double operator op (const float &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS;} \
-   inline double operator op (const int &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
-   inline double operator op (const unsigned int &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
-   inline double operator op (const signed char &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
-   inline double operator op (const unsigned char &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
-   inline double operator op (const signed short &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
-   inline double operator op (const unsigned short &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
-   inline double operator op (const cpp::Int64 &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
-   inline double operator op (const cpp::UInt64 &inLHS,const cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const double &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS;} \
+   inline double operator op (const float &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS;} \
+   inline double operator op (const int &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const unsigned int &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const signed char &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const unsigned char &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const char16_t &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const char32_t &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const signed short &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const unsigned short &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const ::cpp::Int64 &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
+   inline double operator op (const ::cpp::UInt64 &inLHS,const ::cpp::Variant &inRHS) { return inLHS op (double)inRHS; } \
 
    HX_ARITH_VARIANT( - )
    HX_ARITH_VARIANT( + )
@@ -321,8 +334,9 @@ namespace cpp
       if (isNull())  Dynamic::ThrowBadFunctionError();
    }
 
+#if (HXCPP_API_LEVEL<500)
    HX_IMPLEMENT_INLINE_VARIANT_FUNCTIONS
-
+#endif
 
    int Variant::asInt() const
    {
@@ -509,11 +523,7 @@ namespace cpp
                return 1;
             return String(valStringPtr, valStringLen)==inPtr->toString() ? 1 : 0;
          case typeObject:
-            #if (HXCPP_API_LEVEL>=331)
             return valObject->__Compare( inPtr );
-            #else
-            return valObject->__Compare( inPtr->__GetRealObject() );
-            #endif
          default: ;
 
       }
@@ -589,13 +599,13 @@ namespace cpp
 
 
 #define HX_VARIANT_OP_ISEQ(T) \
-inline bool operator == (const T &inLHS,const cpp::Variant &inRHS) { return inRHS==inLHS; } \
-inline bool operator != (const T &inLHS,const cpp::Variant &inRHS) { return inRHS!=inLHS; }
+inline bool operator == (const T &inLHS,const ::cpp::Variant &inRHS) { return inRHS==inLHS; } \
+inline bool operator != (const T &inLHS,const ::cpp::Variant &inRHS) { return inRHS!=inLHS; }
 
 
 #define HX_VARIANT_OP_ISEQ(T) \
-inline bool operator == (const T &inLHS,const cpp::Variant &inRHS) { return inRHS==inLHS; } \
-inline bool operator != (const T &inLHS,const cpp::Variant &inRHS) { return inRHS!=inLHS; }
+inline bool operator == (const T &inLHS,const ::cpp::Variant &inRHS) { return inRHS==inLHS; } \
+inline bool operator != (const T &inLHS,const ::cpp::Variant &inRHS) { return inRHS!=inLHS; }
 
 HX_VARIANT_OP_ISEQ(String)
 HX_VARIANT_OP_ISEQ(double)
@@ -608,6 +618,8 @@ HX_VARIANT_OP_ISEQ(short)
 HX_VARIANT_OP_ISEQ(unsigned short)
 HX_VARIANT_OP_ISEQ(signed char)
 HX_VARIANT_OP_ISEQ(unsigned char)
+HX_VARIANT_OP_ISEQ(char16_t)
+HX_VARIANT_OP_ISEQ(char32_t)
 HX_VARIANT_OP_ISEQ(bool)
 
 inline bool operator < (bool inLHS,const cpp::Variant &inRHS) { return false; }
@@ -621,9 +633,9 @@ inline bool operator > (bool inLHS,const cpp::Variant &inRHS) { return false; }
       { return inRHS.isNumeric() && (inLHS op (double)inRHS); } \
    inline bool operator op (float inLHS,const ::cpp::Variant &inRHS) \
       { return inRHS.isNumeric() && ((double)inLHS op (double)inRHS); } \
-   inline bool operator op (cpp::Int64 inLHS,const ::cpp::Variant &inRHS) \
+   inline bool operator op (::cpp::Int64 inLHS,const ::cpp::Variant &inRHS) \
       { return inRHS.isNumeric() && (inLHS op (double)inRHS); } \
-   inline bool operator op (cpp::UInt64 inLHS,const ::cpp::Variant &inRHS) \
+   inline bool operator op (::cpp::UInt64 inLHS,const ::cpp::Variant &inRHS) \
       { return inRHS.isNumeric() && (inLHS op (double)inRHS); } \
    inline bool operator op (int inLHS,const ::cpp::Variant &inRHS) \
       { return inRHS.isNumeric() && (inLHS op (double)inRHS); } \
@@ -637,7 +649,11 @@ inline bool operator > (bool inLHS,const cpp::Variant &inRHS) { return false; }
       { return inRHS.isNumeric() && (inLHS op (double)inRHS); } \
    inline bool operator op (unsigned char inLHS,const ::cpp::Variant &inRHS) \
       { return inRHS.isNumeric() && (inLHS op (double)inRHS); } \
-   inline bool operator op (const null &,const ::cpp::Variant &inRHS) \
+   inline bool operator op (char16_t inLHS,const ::cpp::Variant &inRHS) \
+      { return inRHS.isNumeric() && (inLHS op (double)inRHS); } \
+   inline bool operator op (char32_t inLHS,const ::cpp::Variant &inRHS) \
+      { return inRHS.isNumeric() && (inLHS op (double)inRHS); } \
+   inline bool operator op (const ::null &,const ::cpp::Variant &inRHS) \
       { return false; } \
 
 HX_COMPARE_VARIANT_OP( < )

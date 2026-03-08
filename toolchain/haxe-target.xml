@@ -1,7 +1,7 @@
 <xml>
 
 <!-- make sure hxcpp.n is up to date -->
-<pleaseUpdateHxcppTool version="3" />
+<pleaseUpdateHxcppTool version="7" />
 
 <pragma once="true" />
 
@@ -12,7 +12,7 @@
 <!-- You can override the exes an "exe" section on your own .hxcpp_config -->
 <!-- You can use replace="1" to change the compiler, or omit to add flags -->
 
-<!-- Library files & targets -------------------------------------->
+<!-- Library files & targets -->
 
 <files id="cffi-depends">
   <depend name="${HXCPP}/include/hx/CFFI.h"/>
@@ -60,7 +60,23 @@
   <depend name="${HXCPP}/include/cpp/Int64.h"/>
   <depend name="${HXCPP}/include/cpp/Variant.h"/>
   <depend name="${HXCPP}/include/cpp/VirtualArray.h"/>
+  <depend name="${HXCPP}/include/cpp/marshal/Definitions.inc"/>
+  <depend name="${HXCPP}/include/cpp/marshal/Boxed.hpp"/>
+  <depend name="${HXCPP}/include/cpp/marshal/PointerType.hpp"/>
+  <depend name="${HXCPP}/include/cpp/marshal/PointerReference.hpp"/>
+  <depend name="${HXCPP}/include/cpp/marshal/ValueType.hpp"/>
+  <depend name="${HXCPP}/include/cpp/marshal/ValueReference.hpp"/>
+  <depend name="${HXCPP}/include/cpp/marshal/View.hpp"/>
+  <depend name="${HXCPP}/include/cpp/marshal/Marshal.hpp"/>
+  <depend name="${HXCPP}/include/cpp/encoding/Ascii.hpp"/>
+  <depend name="${HXCPP}/include/cpp/encoding/Utf8.hpp"/>
+  <depend name="${HXCPP}/include/cpp/encoding/Utf16.hpp"/>
   <depend name="${HXCPP}/include/hx/Scriptable.h"/>
+  <depend name="${HXCPP}/include/hx/zip/Zip.hpp"/>
+  <depend name="${HXCPP}/include/hx/zip/Compress.hpp"/>
+  <depend name="${HXCPP}/include/hx/zip/Uncompress.hpp"/>
+  <depend name="${HXCPP}/include/hx/thread/RecursiveMutex.hpp"/>
+  <depend name="${HXCPP}/include/hx/thread/ConditionVariable.hpp"/>
   <section unless="HXCPP_LINK_NO_TOOL_DEPENDS" >
      <depend name="${HXCPP}/toolchain/haxe-target.xml" dateOnly="true" />
      <depend name="${HXCPP}/toolchain/${toolchain}-toolchain.xml" ifExists="${HXCPP}/toolchain/${toolchain}-toolchain.xml" dateOnly="true" />
@@ -133,6 +149,16 @@
   <cache value="1" project="hxcpp-cppia" asLibrary="true" />
 </files>
 
+<files id="tracy" dir="${HXCPP}" tags="haxe"  >
+  <depend files="hxcpp-depends"/>
+  <options name="Options.txt"/>
+  <compilerflag value="-DTRACY_ENABLE"/>
+  <compilerflag value="-DTRACY_NO_EXIT" if="HXCPP_TRACY_NO_EXIT"/>
+  <compilerflag value="-DTRACY_ON_DEMAND" if="HXCPP_TRACY_ON_DEMAND"/>
+
+  <file name="project/thirdparty/tracy-0.12.0/TracyClient.cpp"/>
+  <cache value="1" project="hxcpp-tracy" asLibrary="true" />
+</files>
 
 <files id="runtime" dir="${HXCPP}" tags="haxe" >
   <depend files="hxcpp-depends"/>
@@ -148,19 +174,23 @@
 
   <file name = "src/hx/Anon.cpp"/>
   <file name = "src/hx/Boot.cpp"/>
-  <file name = "src/hx/CFFI.cpp" tags="haxe,static" />
+  <file name = "src/hx/CFFI.cpp" tags="haxe,static,cffi" />
   <file name = "src/hx/Date.cpp"/>
   <file name = "src/hx/gc/GcCommon.cpp" tags="haxe,gc" />
   <file name = "src/hx/gc/Immix.cpp" tags="haxe,gc" />
   <file name = "src/hx/gc/GcRegCapture.cpp" tags="haxe,gc" />
   <file name = "src/hx/Hash.cpp"/>
-  <file name = "src/hx/Interface.cpp"/>
   <file name = "src/hx/Lib.cpp" tags="haxe,static" />
   <file name = "src/hx/Object.cpp"/>
   <file name = "src/hx/StdLibs.cpp" tags="haxe,static" />
   <file name = "src/hx/Debug.cpp"/>
   <file name = "src/hx/Debugger.cpp" if="HXCPP_DEBUGGER" />
-  <file name = "src/hx/Telemetry.cpp" if="HXCPP_TELEMETRY" />
+
+  <section if="HXCPP_TELEMETRY">
+    <file name = "src/hx/TelemetryTracy.cpp" if="HXCPP_TRACY"/>
+    <file name = "src/hx/Telemetry.cpp" unless="HXCPP_TRACY"/>
+  </section>
+  
   <file name = "src/hx/Profiler.cpp" if="HXCPP_PROFILER" />
   <file name = "src/hx/Thread.cpp"/>
   <file name = "src/hx/RunLibs.cpp" if="static_link||dll_link"/>
@@ -173,6 +203,26 @@
   <file name = "src/Enum.cpp"/>
   <file name = "src/Math.cpp"/>
   <file name = "src/String.cpp" tags="haxe,hxstring" />
+
+  <file name = "src/cpp/encoding/Ascii.cpp"/>
+  <file name = "src/cpp/encoding/Utf8.cpp"/>
+  <file name = "src/cpp/encoding/Utf16.cpp"/>
+
+  <file name="src/hx/thread/RecursiveMutex.cpp"/>
+  <file name="src/hx/thread/ConditionVariable.cpp"/>
+  
+  <section if="windows">
+    <file name="src/hx/thread/CountingSemaphore.win32.cpp"/>
+  </section>
+  <section if="apple">
+    <file name="src/hx/thread/CountingSemaphore.apple.cpp"/>
+  </section>
+  <section if="linux||android">
+    <file name="src/hx/thread/CountingSemaphore.posix.cpp"/>
+  </section>
+  <section unless="windows||apple||linux||android">
+    <file name="src/hx/thread/CountingSemaphore.unsupported.cpp"/>
+  </section>
 
   <addTwice if="linux||android" />
   <cache value="1" project="hxcpp_runtime" asLibrary="true" />
@@ -225,7 +275,8 @@
      <ext value="${LIBEXTRA}" if="exe_link" />
   </section>
 
-  <fullouput name="${HAXE_FULL_OUTPUT_NAME}" if="HAXE_FULL_OUTPUT_NAME" />
+  <!-- Note: was - 'fullouput' -->
+  <fulloutput name="${HAXE_FULL_OUTPUT_NAME}" if="HAXE_FULL_OUTPUT_NAME" />
   <fullunstripped name="${HAXE_FULL_UNSTRIPPED_NAME}" if="HAXE_FULL_UNSTRIPPED_NAME" />
 
   <files id="__main__" unless="static_link" />
@@ -234,6 +285,7 @@
   <files id="__externs__" />
   <files id="runtime" unless="dll_import" />
   <files id="cppia" if="scriptable" />
+  <files id="tracy" if="HXCPP_TRACY" />
   <files id="rc" unless="static_link" />
   <lib name="-lpthread" if="linux" unless="static_link" />
   <lib name="-ldl" if="linux" unless="static_link" />

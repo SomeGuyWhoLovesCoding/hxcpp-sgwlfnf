@@ -5,16 +5,9 @@ namespace hx
 {
 
 
-#if (HXCPP_API_LEVEL>=330)
-  #define BasePtr(x) x
-  typedef cpp::VirtualArray_obj ArrayAnyImpl;
-  #define CALL(x) x
-#else
-  #define BasePtr(x) x.mPtr
-  typedef ArrayBase ArrayAnyImpl;
-  #define CALL(x) __##x
-#endif
-
+#define BasePtr(x) x
+typedef cpp::VirtualArray_obj ArrayAnyImpl;
+#define CALL(x) x
 
 #ifdef CPPIA_JIT
 static hx::Object * SLJIT_CALL objGetItem(hx::Object *inObj, int inIndex)
@@ -608,11 +601,11 @@ struct ArrayBuiltinAny : public ArrayBuiltinBase
       TRY_NATIVE
       if (FUNC==afMap)
       {
-         return inArray->map(inFunction).mPtr;
+         return inArray->map(Dynamic(inFunction)).mPtr;
       }
       else
       {
-         return inArray->filter(inFunction).mPtr;
+         return inArray->filter(Dynamic(inFunction)).mPtr;
       }
       CATCH_NATIVE
       return 0;

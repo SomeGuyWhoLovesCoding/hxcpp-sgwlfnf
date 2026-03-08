@@ -22,6 +22,10 @@ class File
    public var mFilterOut:String;
    public var mEmbedName:String;
    public var mScramble:String;
+   public var mCStandard:Int;
+   public var mCxxStandard:Int;
+   public var mObjCStandard:Int;
+   public var mObjCxxStandard:Int;
    static public var mDependMutex = new Mutex();
 
    public function new(inName:String, inGroup:FileGroup)
@@ -43,6 +47,10 @@ class File
    inline public function getCacheProject() return mGroup.getCacheProject();
 
    public function isNvcc() return mGroup.mNvcc;
+
+   public function isAsm() return mName.endsWith(".asm");
+
+   public function getAsmExe(compilerAsm:String) return mGroup.getAsmExe(compilerAsm);
 
    public function isResource() return mName.endsWith(".rc");
 

@@ -27,7 +27,6 @@ enum hxObjectType
    vtAbstractBase = 0x100,
 };
 
-
 namespace hx
 {
 
@@ -41,16 +40,14 @@ HXCPP_EXTERN_CLASS_ATTRIBUTES null BadCast();
 #ifdef HXCPP_SCRIPTABLE
 
 // CPPIA_CALL = fastcall on x86(32), nothing otherwise
-#if (HXCPP_API_LEVEL >= 331)
-   #if (defined(_WIN32) && !defined(_M_X64) && !defined(__x86_64__) && !defined(_ARM_) ) || \
-      defined(HXCPP_X86) || defined(__i386__) || defined(__i386) || \
-        (!defined(_WIN32) && !defined(_ARM_) && !defined(__arm__) && !defined(__x86_64__) )
+#if (defined(_WIN32) && !defined(_M_X64) && !defined(__x86_64__) && !defined(_ARM_) ) || \
+   defined(HXCPP_X86) || defined(__i386__) || defined(__i386) || \
+   (!defined(_WIN32) && !defined(_ARM_) && !defined(__arm__) && !defined(__x86_64__) )
 
-      #if defined(__GNUC__) && !defined(__APPLE__) && !defined(EMSCRIPTEN)
-         #define CPPIA_CALL __attribute__ ((fastcall))
-      #elif defined(_MSC_VER)
-         #define CPPIA_CALL __fastcall
-      #endif
+   #if defined(__GNUC__) && !defined(__APPLE__) && !defined(EMSCRIPTEN)
+      #define CPPIA_CALL __attribute__ ((fastcall))
+   #elif defined(_MSC_VER)
+      #define CPPIA_CALL __fastcall
    #endif
 #endif
 
@@ -196,9 +193,7 @@ public:
    void operator delete( void *, hx::NewObjectType) { }
    void operator delete( void *, hx::NewObjectType, const char * ) { }
 
-   #if (HXCPP_API_LEVEL>=332)
    virtual bool _hx_isInstanceOf(int inClassId);
-   #endif
 
    //virtual void *__root();
    virtual void __Mark(hx::MarkContext *__inCtx) { }
@@ -225,28 +220,10 @@ public:
    virtual bool __HasField(const String &inString);
    virtual hx::Val __Field(const String &inString, hx::PropertyAccess inCallProp);
 
-   #if (HXCPP_API_LEVEL <= 330)
-   virtual bool __Is(hx::Object *inClass) const { return true; }
-   virtual hx::Object *__GetRealObject() { return this; }
-   bool __Is(Dynamic inClass ) const;
-   #endif
-
-   #if (HXCPP_API_LEVEL >= 330)
    // Non-virtual
    Dynamic __IField(int inFieldID);
    double __INumField(int inFieldID);
    virtual void *_hx_getInterface(int inId);
-   #else
-   virtual hx::Object *__ToInterface(const hx::type_info &inInterface) { return 0; }
-   virtual Dynamic __IField(int inFieldID);
-   virtual double __INumField(int inFieldID);
-
-   // These have been moved to EnumBase
-   virtual DynamicArray __EnumParams();
-   virtual String __Tag() const;
-   virtual int __Index() const;
-   virtual void __SetSize(int inLen) { }
-   #endif
 
    virtual hx::Val __SetField(const String &inField,const hx::Val &inValue, hx::PropertyAccess inCallProp);
 
@@ -262,7 +239,7 @@ public:
    virtual Dynamic __GetItem(int inIndex) const;
    virtual Dynamic __SetItem(int inIndex,Dynamic inValue);
 
-
+#if (HXCPP_API_LEVEL<500)
    typedef const Dynamic &D;
    virtual Dynamic __run();
    virtual Dynamic __run(D a);
@@ -270,6 +247,7 @@ public:
    virtual Dynamic __run(D a,D b,D c);
    virtual Dynamic __run(D a,D b,D c,D d);
    virtual Dynamic __run(D a,D b,D c,D d,D e);
+#endif
 
    virtual int __ArgCount() const { return -1; }
 
@@ -279,12 +257,7 @@ public:
    static hx::ScriptFunction __script_construct;
    #endif
 
-   #if (HXCPP_API_LEVEL>=331)
    inline bool __compare( hx::Object *inRHS ) { return this!=inRHS; }
-   #else
-   inline bool __compare( hx::Object *inRHS )
-      { return __GetRealObject()!=inRHS->__GetRealObject(); }
-   #endif
 
    static hx::Class &__SGetClass();
    static void __boot();
@@ -310,17 +283,8 @@ protected:
    {
       if (inPtr)
       {
-         #if (HXCPP_API_LEVEL>=332)
-            mPtr = inPtr->_hx_isInstanceOf(OBJ_::_hx_ClassId) ? reinterpret_cast<OBJ_ *>(inPtr) : 0;
-         #elif (HXCPP_API_LEVEL>=331)
-            mPtr = dynamic_cast<OBJ_ *>(inPtr);
-         #else
-            mPtr = dynamic_cast<OBJ_ *>(inPtr->__GetRealObject());
-            #if (HXCPP_API_LEVEL < 330)
-            if (!mPtr)
-               mPtr = (Ptr)inPtr->__ToInterface(typeid(Obj));
-            #endif
-         #endif
+         mPtr = inPtr->_hx_isInstanceOf(OBJ_::_hx_ClassId) ? reinterpret_cast<OBJ_*>(inPtr) : 0;
+
          if (inThrowOnInvalid && !mPtr)
             ::hx::BadCast();
       }
@@ -358,7 +322,13 @@ public:
    inline ObjectPtr(const SOURCE_ *inPtr,bool inCheckCast=true)
    {
       if (!SetPtr(const_cast<SOURCE_ *>(inPtr)))
-         CastPtr(const_cast<SOURCE_ *>(inPtr),inCheckCast);
+         CastPtr(
+#if (HXCPP_API_LEVEL>=500)
+             reinterpret_cast<::hx::Object*>(const_cast<SOURCE_ *>(inPtr))
+#else
+             const_cast<SOURCE_*>(inPtr)
+#endif
+             ,inCheckCast);
    }
 
    inline ObjectPtr &operator=(const null &inNull) { mPtr = 0; return *this; }
@@ -437,7 +407,6 @@ public:
 
 
 } // end namespace hx
-
 
 
 #endif

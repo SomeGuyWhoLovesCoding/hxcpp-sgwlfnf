@@ -575,6 +575,9 @@ struct CppiaVar
 
 
 
+#if (HXCPP_API_LEVEL >= 500)
+# define NATIVE_CLASS_OVERRIDES_MARKED
+#endif
 
 class HaxeNativeClass
 {
@@ -596,6 +599,10 @@ public:
    static HaxeNativeClass *findClass(const std::string &inName);
    static HaxeNativeClass *hxObject();
    static void link();
+#ifndef NATIVE_CLASS_OVERRIDES_MARKED
+private:
+   void addVtableEntries( std::vector<std::string> &outVtable, hx::UnorderedSet<std::string> &outMethodsSet);
+#endif
 };
 
 class HaxeNativeInterface
@@ -604,18 +611,9 @@ public:
    std::string  name;
    ScriptNamedFunction *functions;
 
-   #if (HXCPP_API_LEVEL >= 330)
    void *scriptTable;
 
    HaxeNativeInterface(const std::string &inName, ScriptNamedFunction *inFunctions,void *inScriptTable);
-
-   #else
-   const hx::type_info *mType;
-   ScriptableInterfaceFactory factory;
-
-   HaxeNativeInterface(const std::string &inName, ScriptNamedFunction *inFunctions,hx::ScriptableInterfaceFactory inFactory,const hx::type_info *inType);
-   #endif
-
 
    ScriptFunction findFunction(const std::string &inName);
 
@@ -654,12 +652,8 @@ public:
    int       interfaceSlotSize;
    void      **vtable;
    std::string name;
-   #if (HXCPP_API_LEVEL>=330)
    std::map<int, void *> interfaceScriptTables;
    std::vector<ScriptNamedFunction *> nativeInterfaceFunctions;
-   #else
-   std::map<std::string, void **> interfaceVTables;
-   #endif
    std::set<String> nativeProperties;
    hx::Class     mClass;
 
@@ -749,11 +743,6 @@ public:
    void dumpVars(const char *inMessage, std::vector<CppiaVar *> &vars);
    void dumpFunctions(const char *inMessage, std::vector<CppiaFunction *> &funcs);
    void dump();
-
-   #if (HXCPP_API_LEVEL < 330)
-   void **getInterfaceVTable(const std::string &inName) { return interfaceVTables[inName]; }
-   void **createInterfaceVTable(int inTypeId);
-   #endif
 
    void mark(hx::MarkContext *__inCtx);
    void markInstance(hx::Object *inThis, hx::MarkContext *__inCtx);
@@ -852,9 +841,9 @@ struct BCRReturn
 };
 
 
-#define BCR_CHECK if (ctx->breakContReturn) return BCRReturn();
-#define BCR_CHECK_RET(x) if (ctx->breakContReturn) return x;
-#define BCR_VCHECK if (ctx->breakContReturn) return;
+#define BCR_CHECK if (ctx->breakContReturn || ctx->exception) return BCRReturn();
+#define BCR_CHECK_RET(x) if (ctx->breakContReturn || ctx->exception) return x;
+#define BCR_VCHECK if (ctx->breakContReturn || ctx->exception) return;
 
 
 
@@ -871,6 +860,15 @@ inline T &runValue(T& outValue, CppiaCtx *ctx, CppiaExpr *expr)
    expr->runVoid(ctx);
    return null();
 }
+
+#if (HXCPP_API_LEVEL>=500)
+template<typename... TArgs>
+inline hx::Callable<void(TArgs...)>& runValue(hx::Callable<void(TArgs...)>& outValue, CppiaCtx* ctx, CppiaExpr* expr)
+{
+   expr->runVoid(ctx);
+   return outValue = hx::Callable<void(TArgs...)>();
+}
+#endif
 
 template<> inline int &runValue(int& outValue, CppiaCtx *ctx, CppiaExpr *expr)
 {
@@ -1099,6 +1097,14 @@ struct NAME \
       Float f = value->runFloat(ctx); \
       BCR_CHECK_RET(ioVal); \
       ioVal  = left OP f; \
+      return ioVal; \
+   } \
+   inline static int &run(int &ioVal, hx::CppiaCtx *ctx, hx::CppiaExpr *value) \
+   { \
+      int left = ioVal; \
+      int i = value->runInt(ctx); \
+      BCR_CHECK_RET(ioVal); \
+      ioVal  = left OP i; \
       return ioVal; \
    } \
    static bool run(bool &ioVal, hx::CppiaCtx *ctx, hx::CppiaExpr *value) { value->runVoid(ctx); return ioVal; } \

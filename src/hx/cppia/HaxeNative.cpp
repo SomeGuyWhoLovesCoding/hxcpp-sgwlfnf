@@ -30,6 +30,7 @@ HaxeNativeClass::HaxeNativeClass(const std::string &inName, int inDataOffset, Sc
    haxeSuper = 0;
 }
 
+#ifdef NATIVE_CLASS_OVERRIDES_MARKED
 void HaxeNativeClass::addVtableEntries( std::vector<std::string> &outVtable)
 {
    if (haxeSuper)
@@ -37,9 +38,28 @@ void HaxeNativeClass::addVtableEntries( std::vector<std::string> &outVtable)
 
    if (functions)
       for(ScriptNamedFunction *func = functions; func->name; func++)
-         if (!func->isStatic)
+         if (!func->isStatic && !func->isOverride)
             outVtable.push_back( func->name );
 }
+#else
+void HaxeNativeClass::addVtableEntries(std::vector<std::string>& outVtable) {
+   hx::UnorderedSet<std::string> methodsSet;
+   addVtableEntries(outVtable, methodsSet);
+}
+
+void HaxeNativeClass::addVtableEntries( std::vector<std::string> &outVtable,  hx::UnorderedSet<std::string>& outMethodsSet)
+{
+   if (haxeSuper)
+      haxeSuper->addVtableEntries(outVtable, outMethodsSet);
+
+   if (functions)
+      for (ScriptNamedFunction* func = functions; func->name; func++)
+         if (!func->isStatic && outMethodsSet.find(func->name) == outMethodsSet.end()) {
+            outVtable.push_back(func->name);
+            outMethodsSet.emplace(func->name);
+         }
+}
+#endif
 
 void HaxeNativeClass::dump()
 {
@@ -158,8 +178,6 @@ void ScriptableRegisterClass( String inName, int inDataOffset, ScriptNamedFuncti
 }
 
 
-#if (HXCPP_API_LEVEL >= 330)
-
 HaxeNativeInterface::HaxeNativeInterface(const std::string &inName,
                                          ScriptNamedFunction *inFunctions,
                                          void *inScriptTable )
@@ -180,36 +198,6 @@ void ScriptableRegisterInterface( String inName,
    HaxeNativeInterface *registered = new HaxeNativeInterface(inName.utf8_str(), inFunctions, inScriptTable);
    (*sScriptRegisteredInterface)[inName.utf8_str()] = registered;
 }
-
-#else
-
-
-HaxeNativeInterface::HaxeNativeInterface(const std::string &inName,
-                                         ScriptNamedFunction *inFunctions,
-                                         hx::ScriptableInterfaceFactory inFactory,
-                                         const hx::type_info *inType)
-{
-   functions = inFunctions;
-   factory = inFactory;
-   name = inName;
-   mType = inType;
-}
-
-void ScriptableRegisterInterface( String inName,
-                                  ScriptNamedFunction *inFunctions,
-                                  const hx::type_info *inType,
-                                  hx::ScriptableInterfaceFactory inFactory )
-{
-   DBGLOG("ScriptableInterfaceFactory %s\n",inName.out_str());
-   if (!sScriptRegisteredInterface)
-      sScriptRegisteredInterface = new HaxeNativeIntefaceMap();
-
-   HaxeNativeInterface *registered = new HaxeNativeInterface(inName.utf8_str(), inFunctions, inFactory,inType);
-   (*sScriptRegisteredInterface)[inName.utf8_str()] = registered;
-}
-
-#endif
-
 
 
 HaxeNativeInterface *HaxeNativeInterface::findInterface(const std::string &inName)

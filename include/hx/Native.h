@@ -86,7 +86,7 @@ namespace hx
 
    };
 
-   HXCPP_CLASS_ATTRIBUTES const char *Init();
+   HXCPP_CLASS_ATTRIBUTES const char *Init(bool stayAttached=true);
    HXCPP_CLASS_ATTRIBUTES void PushTopOfStack(void *);
    HXCPP_CLASS_ATTRIBUTES void PopTopOfStack();
    HXCPP_CLASS_ATTRIBUTES void GcAddOffsetRoot(void *inRoot, int inOffset);
@@ -175,8 +175,8 @@ namespace hx
       T operator->() { return ptr; }
    };
 
-   #define HX_NATIVE_IMPLEMENTATION hx::Object *__GetRealObject() { return this; }
-   #define HX_EXTERN_NATIVE_IMPLEMENTATION hx::Object *__GetRealObject() { return 0; }
+   #define HX_NATIVE_IMPLEMENTATION ::hx::Object *__GetRealObject() { return this; }
+   #define HX_EXTERN_NATIVE_IMPLEMENTATION ::hx::Object *__GetRealObject() { return 0; }
 }
 
 #endif

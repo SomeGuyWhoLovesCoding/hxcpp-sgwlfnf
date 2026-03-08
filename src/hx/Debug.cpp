@@ -8,6 +8,7 @@
 #include <hx/Telemetry.h>
 #include <hx/Unordered.h>
 #include <hx/OS.h>
+#include <mutex>
 
 
 #if defined(HXCPP_CATCH_SEGV) && !defined(_MSC_VER)
@@ -45,7 +46,7 @@ namespace hx
 const char* EXTERN_CLASS_NAME = "extern";
 
 #ifdef HXCPP_STACK_IDS
-static HxMutex sStackMapMutex;
+static std::mutex sStackMapMutex;
 typedef UnorderedMap<int, StackContext *> StackMap;
 static StackMap sStackMap;
 #endif
@@ -77,19 +78,22 @@ static void CriticalErrorHandler(String inErr, bool allowFixup)
       return;
 #endif
 
+#ifdef HXCPP_STACK_TRACE
+   hx::StackContext *ctx = hx::StackContext::getCurrent();
+   ctx->beginCatch(true);
+#endif
+
    if (sCriticalErrorHandler!=null())
       sCriticalErrorHandler(inErr);
 
 #ifdef HXCPP_STACK_TRACE
-   hx::StackContext *ctx = hx::StackContext::getCurrent();
-   ctx->beginCatch(true);
    ctx->dumpExceptionStack();
 #endif
 
     DBGLOG("Critical Error: %s\n", inErr.utf8_str());
 
 #if defined(HX_WINDOWS) && !defined(HX_WINRT)
-    MessageBoxA(0, inErr.utf8_str(), "Critial Error - program must terminate",
+    MessageBoxA(0, inErr.utf8_str(), "Critical Error - program must terminate",
         MB_ICONEXCLAMATION|MB_OK);
 #endif
 
@@ -189,10 +193,8 @@ StackContext::StackContext()
    mIsUnwindingException = false;
    #endif
 
-   #ifdef HXCPP_TELEMETRY
-   //mTelemetry = tlmCreate(this);
-   // Do not automatically start
-   mTelemetry = 0;
+   #if HXCPP_TELEMETRY
+   mTelemetry = tlmCreate(this);
    #endif
 
    #ifdef HXCPP_DEBUGGER
@@ -244,9 +246,10 @@ void StackContext::onThreadAttach()
    #ifdef HXCPP_STACK_IDS
    mThreadId = __hxcpp_GetCurrentThreadNumber();
 
-   sStackMapMutex.Lock();
-   sStackMap[mThreadId] = this;
-   sStackMapMutex.Unlock();
+   {
+       std::lock_guard<std::mutex> guard(sStackMapMutex);
+       sStackMap[mThreadId] = this;
+   }
    #endif
 
    #ifdef HXCPP_DEBUGGER
@@ -301,9 +304,10 @@ void StackContext::onThreadDetach()
    #endif
 
    #ifdef HXCPP_STACK_IDS
-   sStackMapMutex.Lock();
-   sStackMap.erase(mThreadId);
-   sStackMapMutex.Unlock();
+   {
+       std::lock_guard<std::mutex> guard(sStackMapMutex);
+       sStackMap.erase(mThreadId);
+   }
    mThreadId = 0;
    #endif
 
@@ -316,18 +320,17 @@ void StackContext::onThreadDetach()
 void StackContext::getAllStackIds( QuickVec<int> &outIds )
 {
    outIds.clear();
-   sStackMapMutex.Lock();
+
+   std::lock_guard<std::mutex> guard(sStackMapMutex);
+
    for(StackMap::iterator i=sStackMap.begin(); i!=sStackMap.end(); ++i)
       outIds.push(i->first);
-   sStackMapMutex.Unlock();
 }
 
 StackContext *StackContext::getStackForId(int id)
 {
-   sStackMapMutex.Lock();
-   StackContext *result = sStackMap[id];
-   sStackMapMutex.Unlock();
-   return result;
+   std::lock_guard<std::mutex> guard(sStackMapMutex);
+   return sStackMap[id];
 }
 #endif
 
@@ -444,14 +447,7 @@ void StackContext::dumpExceptionStack()
 ExceptionStackFrame::ExceptionStackFrame(const StackFrame &inFrame)
 {
    // It is safe to use the pointer in 331+
-   #if HXCPP_API_LEVEL > 330
    position = inFrame.position;
-   #else
-   // Must copy the pointer values
-   className =  inFrame.position->className;
-   functionName =  inFrame.position->functionName;
-   fileName =  inFrame.position->fileName;
-   #endif
 
    #ifdef HXCPP_STACK_LINE
    line = inFrame.lineNumber;
@@ -464,11 +460,9 @@ ExceptionStackFrame::ExceptionStackFrame(const StackFrame &inFrame)
    int line=0;
    #endif
 
-   #if HXCPP_API_LEVEL > 330
    const char *fileName = position->fileName;
    const char *className = position->className;
    const char *functionName = position->functionName;
-   #endif
 
    return FormatStack(fileName, className, functionName, line, inForDisplay);
 }
