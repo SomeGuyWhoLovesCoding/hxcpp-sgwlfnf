@@ -1,6 +1,10 @@
 #ifndef HX_ANON_H
 #define HX_ANON_H
 
+// Forward declaration required by Anon_obj::__Remove (full definition at bottom of file)
+HXCPP_EXTERN_CLASS_ATTRIBUTES
+bool __hxcpp_anon_remove(Dynamic inObj, ::String inKey);
+
 
 namespace hx
 {
@@ -394,7 +398,7 @@ public:
          HX_VISIT_MEMBER(mInline[i].key);
       }
       if (mFields.mPtr)
-         FieldMapVisit(&mFields, __inCtx);
+         FieldMapVisit((Dynamic **)&mFields, __inCtx);
    }
    #endif
 
