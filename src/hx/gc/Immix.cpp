@@ -65,6 +65,14 @@ enum { gAlwaysMove = false };
 
 #include <hx/QuickVec.h>
 
+// --- SSE2 acceleration for GC row scanning ---
+#if defined(HXCPP_M64) && !defined(EMSCRIPTEN)
+// SSE2 is guaranteed on all x86-64 CPUs
+#include <emmintrin.h>
+#define HXCPP_SSE2_ROW_SCAN
+#endif
+
+
 // #define HXCPP_GC_BIG_BLOCKS
 
 
@@ -618,6 +626,60 @@ static void wakeThreadLocked(int inThreadId)
    SignalThreadPool(sThreadWake[inThreadId],sThreadSleeping[inThreadId]);
 }
 
+
+// --- SSE2 row scan helpers ---
+#ifdef HXCPP_SSE2_ROW_SCAN
+
+// Scan rowMarked[start..end) for the first non-zero byte.
+// Returns the index of the first marked row, or 'end' if all zero.
+static inline int simdFindFirstMarked(const unsigned char *rowMarked, int start, int end)
+{
+   __m128i zero = _mm_setzero_si128();
+   while(start + 16 <= end)
+   {
+      __m128i marks = _mm_loadu_si128((const __m128i*)(rowMarked + start));
+      __m128i cmp = _mm_cmpeq_epi8(marks, zero);
+      int mask = _mm_movemask_epi8(cmp);
+      if (mask != 0xFFFF)
+      {
+         unsigned long bit;
+         #if defined(_MSC_VER)
+            _BitScanForward(&bit, (unsigned long)~mask);
+         #else
+            bit = __builtin_ctz(~mask);
+         #endif
+         return start + (int)bit;
+      }
+      start += 16;
+   }
+   while(start < end && rowMarked[start] == 0)
+      start++;
+   return start;
+}
+
+// SSE2 bulk zero check for rowMarked[start..start+count).
+// Returns true if all bytes are zero.
+static inline bool sse2IsAllZero(const unsigned char *rowMarked, int start, int count)
+{
+   __m128i zero = _mm_setzero_si128();
+   while (count >= 16)
+   {
+      __m128i marks = _mm_loadu_si128((const __m128i *)(rowMarked + start));
+      __m128i cmp = _mm_cmpeq_epi8(marks, zero);
+      int mask = _mm_movemask_epi8(cmp);
+      if (mask != 0xFFFF)
+         return false;
+      start += 16;
+      count -= 16;
+   }
+   for (int i = 0; i < count; i++)
+      if (rowMarked[start + i] != 0)
+         return false;
+   return true;
+}
+
+#endif // HXCPP_SSE2_ROW_SCAN
+
 union BlockData
 {
    // First 2/4 bytes are not needed for row markers (first 2/4 rows are for flags)
@@ -994,10 +1056,14 @@ struct BlockDataInfo
       if (!rowMarked[r])
       #endif
       {
+         #ifdef HXCPP_SSE2_ROW_SCAN
+         r = sse2FindFirstMarked(rowMarked, r, IMMIX_LINES);
+         #else
          while(r<(IMMIX_LINES-4) && *(int *)(rowMarked+r)==0 )
             r += 4;
          while(r<(IMMIX_LINES) && rowMarked[r]==0)
             r++;
+         #endif
       }
 
       if (r==IMMIX_LINES)
@@ -1031,6 +1097,69 @@ struct BlockDataInfo
                   if (starts)
                   {
                      unsigned int *headerPtr = ((unsigned int *)mPtr->mRow[r]);
+
+                     #ifdef HXCPP_SSE2_ROW_SCAN
+                     // SSE2: batch-load headers and compare mark IDs in parallel.
+                     // Process each byte-lane of 'starts' that has bits set.
+                     {
+                        unsigned int remaining = starts;
+                        while(remaining)
+                        {
+                           int firstBit = __builtin_ctz(remaining);
+                           int lane = firstBit >> 3;
+                           unsigned int laneMask = 0xFFu << (lane * 8);
+                           unsigned int laneBits = remaining & laneMask;
+                           if (!laneBits) { remaining &= ~laneMask; continue; }
+
+                           int base = lane * 8;
+                           int pop = __builtin_popcount(laneBits);
+
+                           // Load pop headers into SSE2 register
+                           __m128i headers = _mm_setzero_si128();
+                           {
+                              unsigned int bits = laneBits;
+                              int slot = 0;
+                              while(bits && slot < 4)
+                              {
+                                 int i = base + __builtin_ctz(bits);
+                                 bits &= bits - 1;
+                                 headers = _mm_insert_epi32(headers, headerPtr[i], slot);
+                                 slot++;
+                              }
+                           }
+
+                           __m128i markMask = _mm_set1_epi32(IMMIX_ALLOC_MARK_ID);
+                           __m128i markID = _mm_set1_epi32(hx::gMarkID);
+                           __m128i masked = _mm_and_si128(headers, markMask);
+                           __m128i alive = _mm_cmpeq_epi32(masked, markID);
+
+                           // Process results
+                           {
+                              unsigned int bits = laneBits;
+                              int slot = 0;
+                              while(bits)
+                              {
+                                 int i = base + __builtin_ctz(bits);
+                                 bits &= bits - 1;
+                                 bool isAlive = (slot < 4) ? (_mm_extract_epi32(alive, slot) != 0) :
+                                                ((headerPtr[i] & IMMIX_ALLOC_MARK_ID) == hx::gMarkID);
+                                 if (!isAlive)
+                                 {
+                                    starts ^= (1u << i);
+                                 }
+                                 else
+                                 {
+                                    usedBytes += sizeof(int) + ((headerPtr[i] & IMMIX_ALLOC_SIZE_MASK) >> IMMIX_ALLOC_SIZE_SHIFT);
+                                 }
+                                 slot++;
+                              }
+                           }
+
+                           remaining &= ~laneMask;
+                        }
+                     }
+                     #else
+                     // Original scalar path
                      #define CHECK_FLAG(i,byteMask) \
                      { \
                         unsigned int mask = 1<<i; \
@@ -1063,6 +1192,9 @@ struct BlockDataInfo
                      if (starts & 0xff000000)
                         for(int i=24;i<32;i++)
                            CHECK_FLAG(i,0xff000000);
+
+                     #undef CHECK_FLAG
+                     #endif
                   }
                }
                r++;
@@ -1079,10 +1211,14 @@ struct BlockDataInfo
                if (!rowMarked[r])
                #endif
                {
+                  #ifdef HXCPP_SSE2_ROW_SCAN
+                  r = sse2FindFirstMarked(rowMarked, r, IMMIX_LINES);
+                  #else
                   while(r<(IMMIX_LINES-4) && *(int *)(rowMarked+r)==0 )
                      r += 4;
                   while(r<(IMMIX_LINES) && rowMarked[r]==0)
                      r++;
+                  #endif
                }
                ranges[hole].length = r-start;
                hole++;
