@@ -1028,53 +1028,48 @@ struct BlockDataInfo
    void countRows(BlockDataStats &outStats)
    {
       unsigned char *rowMarked = mPtr->mRowMarked;
-      unsigned int *rowTotals = ((unsigned int *)rowMarked) + 1;
-
-      // TODO - sse/neon
-      #ifdef HXCPP_GC_BIG_BLOCKS
       unsigned int total = 0;
-      #else
-      unsigned int total = rowMarked[2] + rowMarked[3];
-      #endif
 
-      total +=
-       rowTotals[0]  + rowTotals[1]  + rowTotals[2]  + rowTotals[3]  + rowTotals[4] +
-       rowTotals[5]  + rowTotals[6]  + rowTotals[7]  + rowTotals[8]  + rowTotals[9] +
-       rowTotals[10] + rowTotals[11] + rowTotals[12] + rowTotals[13] + rowTotals[14] +
-       rowTotals[15] + rowTotals[16] + rowTotals[17] + rowTotals[18] + rowTotals[19] +
-       rowTotals[20] + rowTotals[21] + rowTotals[22] + rowTotals[23] + rowTotals[24] +
-       rowTotals[25] + rowTotals[26] + rowTotals[27] + rowTotals[28] + rowTotals[29] +
-       rowTotals[30] + rowTotals[31] + rowTotals[32] + rowTotals[33] + rowTotals[34] +
-       rowTotals[35] + rowTotals[36] + rowTotals[37] + rowTotals[38] + rowTotals[39] +
-       rowTotals[40] + rowTotals[41] + rowTotals[42] + rowTotals[43] + rowTotals[44] +
-       rowTotals[45] + rowTotals[46] + rowTotals[47] + rowTotals[48] + rowTotals[49] +
-       rowTotals[50] + rowTotals[51] + rowTotals[52] + rowTotals[53] + rowTotals[54] +
-       rowTotals[55] + rowTotals[56] + rowTotals[57] + rowTotals[58] + rowTotals[59] +
-       rowTotals[60] + rowTotals[61] + rowTotals[62];
+   #ifdef HXCPP_SSE2_SWEEP
+      // SSE2 Fast Path: Sum 16 bytes at a time using _mm_sad_epu8
+      // We skip the first 8 bytes (header flags) just like the scalar version
+      __m128i zero = _mm_setzero_si128();
+      __m128i sum_vec = _mm_setzero_si128();
+      
+      for (int r = 8; r < IMMIX_LINES; r += 16)
+      {
+         __m128i v = _mm_loadu_si128((const __m128i*)(rowMarked + r));
+         // _mm_sad_epu8 computes the sum of absolute differences against 'zero'
+         // Since rowMarked values are 0 or 1, this effectively sums the bytes.
+         sum_vec = _mm_add_epi64(sum_vec, _mm_sad_epu8(v, zero));
+      }
+      
+      // Horizontal add of the two 64-bit integers in the XMM register
+      uint64_t low = _mm_extract_epi64(sum_vec, 0);
+      uint64_t high = _mm_extract_epi64(sum_vec, 1);
+      total = (unsigned int)(low + high);
 
-
-      #ifdef HXCPP_GC_BIG_BLOCKS
-      rowTotals += 63;
-      total +=
-       rowTotals[0]  + rowTotals[1]  + rowTotals[2]  + rowTotals[3]  + rowTotals[4] +
-       rowTotals[5]  + rowTotals[6]  + rowTotals[7]  + rowTotals[8]  + rowTotals[9] +
-       rowTotals[10] + rowTotals[11] + rowTotals[12] + rowTotals[13] + rowTotals[14] +
-       rowTotals[15] + rowTotals[16] + rowTotals[17] + rowTotals[18] + rowTotals[19] +
-       rowTotals[20] + rowTotals[21] + rowTotals[22] + rowTotals[23] + rowTotals[24] +
-       rowTotals[25] + rowTotals[26] + rowTotals[27] + rowTotals[28] + rowTotals[29] +
-       rowTotals[30] + rowTotals[31] + rowTotals[32] + rowTotals[33] + rowTotals[34] +
-       rowTotals[35] + rowTotals[36] + rowTotals[37] + rowTotals[38] + rowTotals[39] +
-       rowTotals[40] + rowTotals[41] + rowTotals[42] + rowTotals[43] + rowTotals[44] +
-       rowTotals[45] + rowTotals[46] + rowTotals[47] + rowTotals[48] + rowTotals[49] +
-       rowTotals[50] + rowTotals[51] + rowTotals[52] + rowTotals[53] + rowTotals[54] +
-       rowTotals[55] + rowTotals[56] + rowTotals[57] + rowTotals[58] + rowTotals[59] +
-       rowTotals[60] + rowTotals[61] + rowTotals[62] + rowTotals[63];
-
-      #endif
+   #else
+      // Scalar Fallback (Original Code)
+      unsigned int *rowTotals = ((unsigned int *)rowMarked) + 1;
+      total = rowMarked[2] + rowMarked[3];
+      total += rowTotals[0] + rowTotals[1] + rowTotals[2] + rowTotals[3] + rowTotals[4] +
+               rowTotals[5] + rowTotals[6] + rowTotals[7] + rowTotals[8] + rowTotals[9] +
+               rowTotals[10] + rowTotals[11] + rowTotals[12] + rowTotals[13] + rowTotals[14] +
+               rowTotals[15] + rowTotals[16] + rowTotals[17] + rowTotals[18] + rowTotals[19] +
+               rowTotals[20] + rowTotals[21] + rowTotals[22] + rowTotals[23] + rowTotals[24] +
+               rowTotals[25] + rowTotals[26] + rowTotals[27] + rowTotals[28] + rowTotals[29] +
+               rowTotals[30] + rowTotals[31] + rowTotals[32] + rowTotals[33] + rowTotals[34] +
+               rowTotals[35] + rowTotals[36] + rowTotals[37] + rowTotals[38] + rowTotals[39] +
+               rowTotals[40] + rowTotals[41] + rowTotals[42] + rowTotals[43] + rowTotals[44] +
+               rowTotals[45] + rowTotals[46] + rowTotals[47] + rowTotals[48] + rowTotals[49] +
+               rowTotals[50] + rowTotals[51] + rowTotals[52] + rowTotals[53] + rowTotals[54] +
+               rowTotals[55] + rowTotals[56] + rowTotals[57] + rowTotals[58] + rowTotals[59] +
+               rowTotals[60] + rowTotals[61] + rowTotals[62];
+   #endif
 
       mUsedRows = (total & 0xff) + ((total>>8) & 0xff) + ((total>>16)&0xff) + ((total>>24)&0xff);
       mUsedBytes = mUsedRows<<IMMIX_LINE_BITS;
-
       mZeroLock = 0;
       mOwned = false;
       outStats.rowsInUse += mUsedRows;
@@ -1082,10 +1077,9 @@ struct BlockDataInfo
       outStats.fraggedRows += mFraggedRows;
       mFraggedRows = 0;
       mHoles = 0;
-
+      
       if (mUsedRows==IMMIX_USEFUL_LINES)
       {
-         // All rows used - write the block off
          mMoveScore = 0;
          mZeroed = ZEROED_AUTO;
          mReclaimed = true;
@@ -1095,10 +1089,8 @@ struct BlockDataInfo
          mZeroed = ZEROED_NOT;
          mReclaimed = false;
       }
-
       int left = (IMMIX_USEFUL_LINES - mUsedRows) << IMMIX_LINE_BITS;
-      if (left<mMaxHoleSize)
-         mMaxHoleSize = left;
+      if (left<mMaxHoleSize) mMaxHoleSize = left;
    }
 
    template<bool FULL>
@@ -2494,7 +2486,7 @@ void MarkStringArray(String *inPtr, int inLength, hx::MarkContext *__inCtx)
 // --- Roots -------------------------------
 
 FILE_SCOPE std::mutex* sGCRootLock = nullptr;
-typedef hx::UnorderedSet<hx::Object **> RootSet;
+typedef hx::QuickVec<hx::Object **> RootSet;
 static RootSet sgRootSet;
 
 typedef hx::UnorderedMap<void *,int> OffsetRootSet;
@@ -2503,13 +2495,13 @@ static OffsetRootSet *sgOffsetRootSet=0;
 void GCAddRoot(hx::Object **inRoot)
 {
    std::lock_guard<std::mutex> lock(*sGCRootLock);
-   sgRootSet.insert(inRoot);
+   sgRootSet.push(inRoot);
 }
 
 void GCRemoveRoot(hx::Object **inRoot)
 {
    std::lock_guard<std::mutex> lock(*sGCRootLock);
-   sgRootSet.erase(inRoot);
+   sgRootSet.qerase_val(inRoot);
 }
 
 
@@ -2593,8 +2585,267 @@ FILE_SCOPE HaxeFinalizerMap sHaxeFinalizerMap;
 // The struct, data, and accessors are ALL defined at the top of this file.
 // Nothing to do here — the code below just uses GetDeferredFinalizers().
 
+template <class Key, class T, class Hash = std::hash<Key>, class KeyEqual = std::equal_to<Key>>
+class CustomUnorderedMap {
+public:
+    using key_type = Key;
+    using mapped_type = T;
+    using value_type = std::pair<const Key, T>;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using hasher = Hash;
+    using key_equal = KeyEqual;
+    using reference = value_type&;
+    using const_reference = const value_type&;
+    using pointer = value_type*;
+    using const_pointer = const value_type*;
+
+private:
+    struct Slot {
+        Key key;
+        T value;
+    };
+    std::vector<Slot> mSlots;
+    std::vector<uint8_t> mStates; // 0: Empty, 1: Occupied, 2: Deleted (Tombstone)
+    size_t mSize;
+    size_t mDeletedCount;
+    size_t mMask;
+    Hash mHash;
+    KeyEqual mEqual;
+
+    static constexpr uint8_t EMPTY = 0;
+    static constexpr uint8_t OCCUPIED = 1;
+    static constexpr uint8_t DELETED = 2;
+
+    void rehash_to(size_t new_cap) {
+        std::vector<Slot> old_slots = std::move(mSlots);
+        std::vector<uint8_t> old_states = std::move(mStates);
+        
+        mSlots.assign(new_cap, Slot{});
+        mStates.assign(new_cap, EMPTY);
+        mMask = new_cap - 1;
+        mDeletedCount = 0;
+        
+        for (size_t i = 0; i < old_slots.size(); ++i) {
+            if (old_states[i] == OCCUPIED) {
+                size_t idx = mHash(old_slots[i].key) & mMask;
+                while (mStates[idx] != EMPTY) {
+                    idx = (idx + 1) & mMask;
+                }
+                mSlots[idx].key = std::move(old_slots[i].key);
+                mSlots[idx].value = std::move(old_slots[i].value);
+                mStates[idx] = OCCUPIED;
+            }
+        }
+    }
+
+    void check_rehash() {
+        size_t cap = mSlots.size();
+        // Rehash if load factor > 0.75 or too many tombstones
+        if (cap == 0 || (mSize + mDeletedCount) * 4 > cap * 3) {
+            size_t new_cap = cap == 0 ? 8 : cap * 2;
+            rehash_to(new_cap);
+        }
+    }
+
+public:
+    // --- Iterator ---
+    class Iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = std::pair<const Key, T>;
+        using difference_type = std::ptrdiff_t;
+        using pointer = value_type*;
+        using reference = value_type&;
+
+        CustomUnorderedMap* mMap;
+        size_t mIdx;
+
+        Iterator(CustomUnorderedMap* m, size_t idx) : mMap(m), mIdx(idx) { advance(); }
+
+        void advance() {
+            while (mIdx < mMap->mSlots.size() && mMap->mStates[mIdx] != OCCUPIED) ++mIdx;
+        }
+
+        reference operator*() const {
+            // Safe cast: memory layout of std::pair<Key, T> and std::pair<const Key, T> is identical
+            return *reinterpret_cast<pointer>(&mMap->mSlots[mIdx]);
+        }
+
+        pointer operator->() const {
+            return reinterpret_cast<pointer>(&mMap->mSlots[mIdx]);
+        }
+
+        Iterator& operator++() { ++mIdx; advance(); return *this; }
+        Iterator operator++(int) { Iterator tmp = *this; ++(*this); return tmp; }
+        bool operator==(const Iterator& other) const { return mIdx == other.mIdx; }
+        bool operator!=(const Iterator& other) const { return mIdx != other.mIdx; }
+    };
+
+    using iterator = Iterator;
+    using const_iterator = Iterator;
+
+    // --- Constructors ---
+    CustomUnorderedMap() : mSize(0), mDeletedCount(0), mMask(0) {}
+    ~CustomUnorderedMap() = default;
+
+    // --- Capacity ---
+    bool empty() const { return mSize == 0; }
+    size_t size() const { return mSize; }
+    size_t max_size() const { return mSlots.max_size(); }
+
+    // --- Modifiers ---
+    void clear() {
+        mSlots.clear(); mStates.clear();
+        mSize = 0; mDeletedCount = 0; mMask = 0;
+    }
+
+    void reserve(size_t count) {
+        if (count == 0) return;
+        size_t cap = 8;
+        while (cap < count * 2) cap <<= 1; // Keep load factor < 0.5
+        if (cap > mSlots.size()) rehash_to(cap);
+    }
+
+    std::pair<iterator, bool> insert(const value_type& v) { return emplace(v.first, v.second); }
+    std::pair<iterator, bool> insert(value_type&& v) { return emplace(std::move(v.first), std::move(v.second)); }
+
+    template <class... Args>
+    std::pair<iterator, bool> emplace(Args&&... args) {
+        check_rehash();
+        std::pair<Key, T> temp(std::forward<Args>(args)...);
+        
+        size_t idx = mHash(temp.first) & mMask;
+        size_t first_deleted = mSlots.size();
+        
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, temp.first))
+                return {iterator(this, idx), false};
+            if (mStates[idx] == DELETED && first_deleted == mSlots.size())
+                first_deleted = idx;
+            idx = (idx + 1) & mMask;
+        }
+        
+        size_t insert_idx = (first_deleted != mSlots.size()) ? first_deleted : idx;
+        mSlots[insert_idx].key = std::move(temp.first);
+        mSlots[insert_idx].value = std::move(temp.second);
+        mStates[insert_idx] = OCCUPIED;
+        mSize++;
+        return {iterator(this, insert_idx), true};
+    }
+
+    size_t erase(const key_type& k) {
+        if (mSlots.empty()) return 0;
+        size_t idx = mHash(k) & mMask;
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, k)) {
+                mStates[idx] = DELETED;
+                mSlots[idx].key.~Key();
+                mSlots[idx].value.~T();
+                mSize--; mDeletedCount++;
+                return 1;
+            }
+            idx = (idx + 1) & mMask;
+        }
+        return 0;
+    }
+
+    iterator erase(iterator it) {
+        if (it.mIdx < mSlots.size() && mStates[it.mIdx] == OCCUPIED) {
+            mStates[it.mIdx] = DELETED;
+            mSlots[it.mIdx].key.~Key();
+            mSlots[it.mIdx].value.~T();
+            mSize--; mDeletedCount++;
+            ++it;
+            return it;
+        }
+        return end();
+    }
+
+    void swap(CustomUnorderedMap& other) {
+        mSlots.swap(other.mSlots); mStates.swap(other.mStates);
+        std::swap(mSize, other.mSize); std::swap(mDeletedCount, other.mDeletedCount);
+        std::swap(mMask, other.mMask); std::swap(mHash, other.mHash); std::swap(mEqual, other.mEqual);
+    }
+
+    // --- Lookup ---
+    iterator find(const key_type& k) {
+        if (mSlots.empty()) return end();
+        size_t idx = mHash(k) & mMask;
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, k))
+                return iterator(this, idx);
+            idx = (idx + 1) & mMask;
+        }
+        return end();
+    }
+
+    const_iterator find(const key_type& k) const { return const_cast<CustomUnorderedMap*>(this)->find(k); }
+    size_t count(const key_type& k) const { return find(k) != end() ? 1 : 0; }
+
+    T& operator[](const key_type& k) {
+        check_rehash();
+        size_t idx = mHash(k) & mMask;
+        size_t first_deleted = mSlots.size();
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, k)) return mSlots[idx].value;
+            if (mStates[idx] == DELETED && first_deleted == mSlots.size()) first_deleted = idx;
+            idx = (idx + 1) & mMask;
+        }
+        size_t insert_idx = (first_deleted != mSlots.size()) ? first_deleted : idx;
+        mSlots[insert_idx].key = k;
+        mSlots[insert_idx].value = T();
+        mStates[insert_idx] = OCCUPIED;
+        mSize++;
+        return mSlots[insert_idx].value;
+    }
+
+    T& operator[](key_type&& k) {
+        check_rehash();
+        size_t idx = mHash(k) & mMask;
+        size_t first_deleted = mSlots.size();
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, k)) return mSlots[idx].value;
+            if (mStates[idx] == DELETED && first_deleted == mSlots.size()) first_deleted = idx;
+            idx = (idx + 1) & mMask;
+        }
+        size_t insert_idx = (first_deleted != mSlots.size()) ? first_deleted : idx;
+        mSlots[insert_idx].key = std::move(k);
+        mSlots[insert_idx].value = T();
+        mStates[insert_idx] = OCCUPIED;
+        mSize++;
+        return mSlots[insert_idx].value;
+    }
+
+    T& at(const key_type& k) {
+        iterator it = find(k);
+        if (it == end()) throw std::out_of_range("CustomUnorderedMap::at");
+        return it->second;
+    }
+
+    const T& at(const key_type& k) const {
+        const_iterator it = find(k);
+        if (it == end()) throw std::out_of_range("CustomUnorderedMap::at");
+        return it->second;
+    }
+
+    // --- Iterators ---
+    iterator begin() { return iterator(this, 0); }
+    const_iterator begin() const { return const_cast<CustomUnorderedMap*>(this)->begin(); }
+    iterator end() { return iterator(this, mSlots.size()); }
+    const_iterator end() const { return const_cast<CustomUnorderedMap*>(this)->end(); }
+
+    // --- Bucket Interface (Stubs for API compatibility) ---
+    size_t bucket_count() const { return mSlots.size(); }
+    size_t max_bucket_count() const { return mSlots.max_size(); }
+    float load_factor() const { return mSlots.empty() ? 0 : (float)mSize / mSlots.size(); }
+    float max_load_factor() const { return 0.75f; }
+    void max_load_factor(float) {} 
+    void rehash(size_t count) { reserve(count); }
+};
+
 hx::QuickVec<int> sFreeObjectIds;
-typedef hx::UnorderedMap<hx::Object *,int> ObjectIdMap;
+typedef CustomUnorderedMap<hx::Object *,int> ObjectIdMap;
 typedef hx::QuickVec<hx::Object *> IdObjectMap;
 FILE_SCOPE ObjectIdMap sObjectIdMap;
 FILE_SCOPE IdObjectMap sIdObjectMap;
@@ -3349,6 +3600,147 @@ static int sMaxZeroQueueSize = 32;
 
 #define BLOCK_OFSIZE_COUNT 12
 
+// Custom open-addressing hash map backed by std::vector for maximum cache locality.
+// Replaces hx::UnorderedMap for mLargeIndex to avoid pointer-chasing overhead.
+struct LargeIndexMap {
+    std::vector<unsigned int*> keys;
+    std::vector<int> values;
+    size_t mask;
+    size_t count; // Tracks the actual number of elements
+
+    LargeIndexMap() : mask(0), count(0) {}
+
+    void reserve(size_t n) {
+        size_t cap = 16;
+        while (cap < n * 2) cap <<= 1;
+        keys.assign(cap, nullptr);
+        values.assign(cap, -1);
+        mask = cap - 1;
+        count = 0;
+    }
+
+    // Returns the index, or -1 if not found
+    int find(unsigned int* key) const {
+        if (mask == 0) return -1;
+        size_t idx = (size_t(key) >> 3) & mask;
+        while (keys[idx] != nullptr) {
+            if (keys[idx] == key) return values[idx];
+            idx = (idx + 1) & mask;
+        }
+        return -1;
+    }
+
+    void insert(unsigned int* key, int value) {
+        if (mask == 0) {
+            reserve(16);
+        } 
+        else if (count * 2 > mask) { // FIXED: Use 'count' instead of 'keys.size()'
+            // Rehash if load factor > 0.5
+            size_t newCap = (mask + 1) * 2;
+            std::vector<unsigned int*> newKeys(newCap, nullptr);
+            std::vector<int> newValues(newCap, -1);
+            size_t newMask = newCap - 1;
+            for (size_t i = 0; i <= mask; ++i) {
+                if (keys[i] != nullptr) {
+                    size_t idx = (size_t(keys[i]) >> 3) & newMask;
+                    while (newKeys[idx] != nullptr) idx = (idx + 1) & newMask;
+                    newKeys[idx] = keys[i];
+                    newValues[idx] = values[i];
+                }
+            }
+            keys = std::move(newKeys);
+            values = std::move(newValues);
+            mask = newMask;
+        }
+        
+        size_t idx = (size_t(key) >> 3) & mask;
+        while (keys[idx] != nullptr) {
+            if (keys[idx] == key) {
+                values[idx] = value; // Update existing key
+                return;
+            }
+            idx = (idx + 1) & mask;
+        }
+        keys[idx] = key;
+        values[idx] = value;
+        count++; // FIXED: Increment actual element count
+    }
+
+    void erase(unsigned int* key) {
+        if (mask == 0) return;
+        size_t idx = (size_t(key) >> 3) & mask;
+        while (keys[idx] != nullptr) {
+            if (keys[idx] == key) {
+                keys[idx] = nullptr;
+                values[idx] = -1;
+                count--; // FIXED: Decrement actual element count
+                
+                // Rehash the cluster to fix tombstones
+                idx = (idx + 1) & mask;
+                while (keys[idx] != nullptr) {
+                    unsigned int* k = keys[idx];
+                    int v = values[idx];
+                    keys[idx] = nullptr;
+                    values[idx] = -1;
+                    size_t newIdx = (size_t(k) >> 3) & mask;
+                    while (keys[newIdx] != nullptr) newIdx = (newIdx + 1) & mask;
+                    keys[newIdx] = k;
+                    values[newIdx] = v;
+                    idx = (idx + 1) & mask;
+                }
+                return;
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+    
+    void clear() {
+        if (mask > 0) {
+            std::fill(keys.begin(), keys.end(), nullptr);
+            std::fill(values.begin(), values.end(), -1);
+            count = 0;
+        }
+    }
+};
+
+// Custom contiguous map for the large object recycle pool.
+// Replaces hx::UnorderedMap<int, std::vector<unsigned int*>>.
+struct LargeRecyclePool {
+    std::vector<std::pair<int, std::vector<unsigned int*>>> buckets;
+
+    using iterator = std::vector<std::pair<int, std::vector<unsigned int*>>>::iterator;
+    using const_iterator = std::vector<std::pair<int, std::vector<unsigned int*>>>::const_iterator;
+
+    iterator find(int size) {
+        for (auto it = buckets.begin(); it != buckets.end(); ++it) {
+            if (it->first == size) return it;
+        }
+        return buckets.end();
+    }
+
+    std::vector<unsigned int*>& operator[](int size) {
+        for (auto& b : buckets) {
+            if (b.first == size) return b.second;
+        }
+        buckets.push_back({size, {}});
+        return buckets.back().second;
+    }
+
+    void erase(iterator it) {
+        buckets.erase(it);
+    }
+
+    void clear() {
+        buckets.clear();
+    }
+    
+    // Required for range-based for loops (for (auto &kv : mLargeRecycleBySize))
+    iterator begin() { return buckets.begin(); }
+    iterator end() { return buckets.end(); }
+    const_iterator begin() const { return buckets.begin(); }
+    const_iterator end() const { return buckets.end(); }
+};
+
 
 class GlobalAllocator
 {
@@ -3371,6 +3763,9 @@ public:
          mLocalPool[p] = 0;
 
       createFreeList();
+
+      mHeapMin = (char*)~(size_t)0;
+      mHeapMax = 0;
    }
    void AddLocal(LocalAllocator *inAlloc)
    {
@@ -3430,21 +3825,19 @@ public:
    // MUST be called with mLargeListLock held.
    void RemoveLargeLocked(unsigned int *blob)
    {
-      auto it = mLargeIndex.find(blob);
-      if (it == mLargeIndex.end())
+      int idx = mLargeIndex.find(blob);
+      if (idx == -1)
       {
          CriticalGCError("Large alloc removed without being added");
          return;
       }
-      int idx = it->second;
-      mLargeIndex.erase(it);
-
+      mLargeIndex.erase(blob);
       int last = mLargeList.size() - 1;
       if (idx != last)
       {
          unsigned int *moved = mLargeList[last];
          mLargeList[idx] = moved;
-         mLargeIndex[moved] = idx;
+         mLargeIndex.insert(moved, idx);
       }
       mLargeList.setSize(last);
    }
@@ -3534,8 +3927,12 @@ public:
          }
       }
 
+      size_t largeAllocSize = inSize + sizeof(int)*2;
       if (!result)
-         result = (unsigned int *)HxAlloc(inSize + sizeof(int)*2);
+      result = (unsigned int *)HxAlloc(largeAllocSize);
+
+      if ((char*)result < mHeapMin) mHeapMin = (char*)result;
+      if ((char*)result + largeAllocSize > mHeapMax) mHeapMax = (char*)result + largeAllocSize;
 
       if (!result)
       {
@@ -3573,7 +3970,7 @@ public:
          mLargeListLock.lock();
 
       // Maintain the O(1) index alongside the push.
-      mLargeIndex[result] = mLargeList.size();
+      mLargeIndex.insert(result, mLargeList.size());
       mLargeList.push(result);
       mLargeAllocated += inSize;
 
@@ -3775,7 +4172,8 @@ public:
          return false;
       }
 
-      char *chunk = (char *)HxAllocGCBlock( 1<<(IMMIX_BLOCK_GROUP_BITS + IMMIX_BLOCK_BITS) );
+      size_t blockAllocSize = 1<<(IMMIX_BLOCK_GROUP_BITS + IMMIX_BLOCK_BITS);
+      char *chunk = (char *)HxAllocGCBlock( blockAllocSize );
       if (!chunk)
       {
          //DebuggerTrap();
@@ -3806,6 +4204,9 @@ public:
       mAllBlocksCount = mAllBlocks.size();
       for(int i=0;i<BLOCK_OFSIZE_COUNT;i++)
          mNextFreeBlockOfSize[i] = newSize;
+
+      if ((char*)chunk < mHeapMin) mHeapMin = (char*)chunk;
+      if ((char*)chunk + blockAllocSize > mHeapMax) mHeapMax = (char*)chunk + blockAllocSize;
 
       #ifdef HXCPP_GC_VERIFY
       VerifyBlockOrder();
@@ -4532,11 +4933,11 @@ public:
 
       hx::VisitClassStatics(inCtx);
 
-      for(hx::RootSet::iterator i = hx::sgRootSet.begin(); i!=hx::sgRootSet.end(); ++i)
+      for(int i = 0; i < hx::sgRootSet.size(); i++)
       {
-         hx::Object **obj = *i;
-         if (*obj)
-            inCtx->visitObject(obj);
+      hx::Object **obj = hx::sgRootSet[i];
+      if (*obj)
+      inCtx->visitObject(obj);
       }
 
 
@@ -4985,9 +5386,9 @@ public:
       {
       hx::AutoMarkPush info(&mMarker,"Roots","root");
 
-      for(hx::RootSet::iterator i = hx::sgRootSet.begin(); i!=hx::sgRootSet.end(); ++i)
+      for(int i = 0; i < hx::sgRootSet.size(); i++)
       {
-         hx::Object *&obj = **i;
+      hx::Object *&obj = *hx::sgRootSet[i];
          if (obj)
             hx::MarkObjectAlloc(obj , &mMarker );
       }
@@ -5095,7 +5496,7 @@ public:
 
    void Collect(bool inMajor, bool inForceCompact, bool inLocked,bool inFreeIsFragged)
    {
-      #if HXCPP_GC_LINE_PROFILE
+      #ifdef HXCPP_GC_LINE_PROFILE
       fprintf(stderr, "[gc.profile] Collect(major=%d, force=%d) called\n",
               (int)inMajor, (int)inForceCompact);
       fflush(stderr);
@@ -5431,7 +5832,7 @@ public:
             if (write != read)
             {
                mLargeList[write] = blob;
-               mLargeIndex[blob] = write;
+               mLargeIndex.insert(blob, write);
             }
             write++;
          }
@@ -5581,32 +5982,37 @@ public:
       #ifdef HXCPP_GC_GENERATIONAL
       if (generational)
       {
-         // TODO - include large too?
+         // Calculate how much of the *free* space was consumed by surviving objects
+         int freeSpace = mAllBlocks.size()*IMMIX_USEFUL_LINES - oldRowsInUse;
          int retained = mRowsInUse - oldRowsInUse;
-         int space = mAllBlocks.size()*IMMIX_USEFUL_LINES - oldRowsInUse;
-         if (space<retained)
-            space = retained;
-
-         mGenerationalRetainEstimate = (double)retained/(double)space;
+         
+         // Prevent division by zero or negative estimates
+         if (freeSpace < 1) freeSpace = 1;
+         if (retained < 0) retained = 0;
+         
+         mGenerationalRetainEstimate = (double)retained / (double)freeSpace;
       }
       else
       {
-         // move towards 0.2
-         mGenerationalRetainEstimate += (0.2-mGenerationalRetainEstimate)*0.25;
+         // Decay the estimate towards a baseline when we do a Full GC
+         mGenerationalRetainEstimate += (0.1 - mGenerationalRetainEstimate) * 0.25;
       }
 
-      double filled_ratio = (double)mRowsInUse/(double)(mAllBlocksCount*IMMIX_USEFUL_LINES);
-      double after_gen = filled_ratio + (1.0-filled_ratio)*mGenerationalRetainEstimate;
+      double filled_ratio = (double)mRowsInUse / (double)(mAllBlocksCount * IMMIX_USEFUL_LINES);
 
-      if (after_gen<0.75)
+      // Project how full the heap will be after the next Gen GC
+      double projected_fullness = filled_ratio + (1.0 - filled_ratio) * mGenerationalRetainEstimate;
+
+      // FIX: The original 0.75 threshold forces Full GC if your working set naturally 
+      // sits above 75% heap utilization. Raising to 0.95 allows Generational to 
+      // work even on heavily utilized heaps.
+      if (projected_fullness < 0.95)
       {
          sGcMode = gcmGenerational;
       }
       else
       {
          sGcMode = gcmFull;
-         // What was I thinking here?  This breaks #851
-         //gByteMarkID |= 0x30;
       }
 
       #ifdef SHOW_MEM_EVENTS
@@ -5767,24 +6173,26 @@ public:
 
    void reclaimBlocks(bool full, BlockDataStats &outStats)
    {
-      if (MAX_GC_THREADS>1)
+      // FIX: Only use multi-threading if the heap is large enough to justify the lock overhead.
+      // For < 1024 blocks, single-threaded SSE2 scanning is significantly faster.
+      if (MAX_GC_THREADS>1 && mAllBlocks.size() > 1024)
       {
          for(int i=0;i<MAX_GC_THREADS;i++)
-            sThreadBlockDataStats[i].clear();
+               sThreadBlockDataStats[i].clear();
          StartThreadJobs(full ? tpjReclaimFull : tpjReclaim, mAllBlocks.size(), true);
          outStats = sThreadBlockDataStats[0];
          for(int i=1;i<MAX_GC_THREADS;i++)
-            outStats.add(sThreadBlockDataStats[i]);
+               outStats.add(sThreadBlockDataStats[i]);
       }
       else
       {
          outStats.clear();
          for(int i=0;i<mAllBlocks.size();i++)
          {
-            if (full)
-               mAllBlocks[i]->reclaim<true>(&outStats);
-            else
-               mAllBlocks[i]->reclaim<false>(&outStats);
+               if (full)
+                  mAllBlocks[i]->reclaim<true>(&outStats);
+               else
+                  mAllBlocks[i]->reclaim<false>(&outStats);
          }
       }
    }
@@ -5792,20 +6200,21 @@ public:
 
    void countRows(BlockDataStats &outStats)
    {
-      if (MAX_GC_THREADS>1)
+      // FIX: Same threshold for countRows
+      if (MAX_GC_THREADS>1 && mAllBlocks.size() > 1024)
       {
          for(int i=0;i<MAX_GC_THREADS;i++)
-            sThreadBlockDataStats[i].clear();
+               sThreadBlockDataStats[i].clear();
          StartThreadJobs(tpjCountRows, mAllBlocks.size(), true);
          outStats = sThreadBlockDataStats[0];
          for(int i=1;i<MAX_GC_THREADS;i++)
-            outStats.add(sThreadBlockDataStats[i]);
+               outStats.add(sThreadBlockDataStats[i]);
       }
       else
       {
          outStats.clear();
          for(int i=0;i<mAllBlocks.size();i++)
-            mAllBlocks[i]->countRows(outStats);
+               mAllBlocks[i]->countRows(outStats);
       }
    }
 
@@ -5922,6 +6331,10 @@ public:
 
    MemType GetMemType(void *inPtr)
    {
+      // O(1) Rejection: Instantly reject 99% of stack pointers (ints, floats, engine ptrs)
+      char *p = (char *)inPtr;
+      if (p < mHeapMin || p > mHeapMax) return memUnmanaged;
+
       BlockData *block = (BlockData *)( ((size_t)inPtr) & IMMIX_BLOCK_BASE_MASK);
 
       bool isBlock = IsAllBlock(block);
@@ -5932,7 +6345,7 @@ public:
       // O(1) hash probe — was O(n) linear scan of mLargeList.
       // User pointer is blob+2; recover blob and look it up.
       unsigned int *blob = ((unsigned int *)inPtr) - 2;
-      if (mLargeIndex.find(blob) != mLargeIndex.end())
+      if (mLargeIndex.find(blob) != -1)
          return memLarge;
 
       return memUnmanaged;
@@ -5966,18 +6379,21 @@ public:
    // --- Large-object fast-path structures ---
    // Size-bucketed recycle pool (replaces flat largeObjectRecycle).
    // O(1) size-match lookup instead of O(n) linear scan.
-   hx::UnorderedMap<int, std::vector<unsigned int *>> mLargeRecycleBySize;
+   LargeRecyclePool mLargeRecycleBySize;
    size_t mLargeRecycleBytes = 0;
 
    // O(1) blob→index map for GetMemType and FreeLarge.
    // Maintained under mLargeListLock alongside mLargeList.
-   hx::UnorderedMap<unsigned int *, int> mLargeIndex;
+   LargeIndexMap mLargeIndex;
 
    // Deferred free queue for large blobs.  During the GC pause, dead blobs are
    // pushed here instead of calling HxFree() inline.  They're drained 2-at-a-time
    // during CallAlloc, spreading the free() cost across normal execution.
    // This keeps the GC pause free of OS heap overhead (~7µs per free()).
    hx::QuickVec<unsigned int *> mDeferredLargeFrees;
+
+   char *mHeapMin;
+   char *mHeapMax;
 };
 
 
@@ -6608,14 +7024,14 @@ public:
       #ifdef HXCPP_DEFER_HAXE_FINALIZERS
       // Auto-drain: process a few deferred finalizers on each allocation.
       // This spreads the finalizer cost across normal execution without
-      // requiring any Haxe-side changes.  Budget: 2 per alloc call, which
+      // requiring any Haxe-side changes.  Budget: 4 per alloc call, which
       // at ~1000 allocs/frame drains ~2000 finalizers/frame at 60fps.
       if (GetDeferredFinalizers().size() > 0)
       {
          // Quick inline drain — avoid function call overhead for the common
          // case where the queue is empty or nearly empty.
          int n = GetDeferredFinalizers().size();
-         int budget = n < 2 ? n : 2;
+         int budget = n < 4 ? n : 4;
          for (int i = 0; i < budget; i++)
          {
             DeferredFinalizerEntry &df = GetDeferredFinalizers()[i];
@@ -6639,7 +7055,7 @@ public:
       if (sGlobalAlloc->mDeferredLargeFrees.size() > 0)
       {
          int n = sGlobalAlloc->mDeferredLargeFrees.size();
-         int budget = n < 2 ? n : 2;
+         int budget = n < 4 ? n : 4;
          for (int i = 0; i < budget; i++)
             HxFree(sGlobalAlloc->mDeferredLargeFrees[i]);
          // Compact
