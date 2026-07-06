@@ -21,7 +21,7 @@
 #include <stdlib.h>
 
 #define HXCPP_DEFER_HAXE_FINALIZERS
-#define HXCPP_GC_LINE_PROFILE
+//#define HXCPP_GC_LINE_PROFILE
 
 
 // Sub-phase timing for RunFinalizers — populated when HXCPP_GC_LINE_PROFILE is on,
