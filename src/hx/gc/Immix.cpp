@@ -8,7 +8,6 @@
 #include <hx/Unordered.h>
 #include <mutex>
 #include <condition_variable>
-#include <atomic>
 
 #ifdef EMSCRIPTEN
    #include <emscripten/stack.h>
@@ -21,9 +20,8 @@
 #include <string>
 #include <stdlib.h>
 
-#define HXCPP_CONCURRENT_MARKING
 #define HXCPP_DEFER_HAXE_FINALIZERS
-#define HXCPP_GC_LINE_PROFILE
+//#define HXCPP_GC_LINE_PROFILE
 
 
 // Sub-phase timing for RunFinalizers — populated when HXCPP_GC_LINE_PROFILE is on,
@@ -708,88 +706,6 @@ static unsigned int sRunningThreads = 0;
 static unsigned int sAllThreads = 0;
 static bool sLazyThreads = false;
 static bool sThreadPoolInit = false;
-
-// ============================================================================
-// Concurrent Marking
-// ============================================================================
-// When enabled, the transitive marking phase runs concurrently with mutator
-// threads, dramatically reducing STW pause times.  The collection proceeds in
-// three phases:
-//
-//   Phase A (STW)  - Clear marks, capture roots (statics, root set, stacks).
-//   Phase B (concurrent) - Release mutators; trace the object graph while
-//                          application threads continue running.
-//   Phase C (STW)  - Re-stop mutators, rescan to catch any mutations that
-//                    happened during Phase B, then finalize (zombies +
-//                    finalizers) and sweep.
-//
-// NO WRITE BARRIERS REQUIRED
-// ===========================
-// The GC is correct by default without any mutator cooperation.  If no
-// write barriers are present, Phase C performs a full-heap rescan of every
-// marked container.  Re-tracing an already-marked object is nearly free
-// (MarkObjectAlloc sees the mark byte is set and returns immediately), so
-// the cost is proportional only to the number of *mutated* objects, not
-// the total heap size.
-//
-// OPTIONAL WRITE BARRIERS
-// =======================
-// If you want to reduce Phase C pause time further, insert
-// HX_CONCURRENT_WB(container) before reference field stores (e.g. in
-// HXCPP code-gen).  Phase C will then rescan only the recorded dirty
-// objects instead of the full heap.  See the write-barrier section below
-// for details.
-//
-// Enable by compiling with -DHXCPP_CONCURRENT_MARKING  (implies atomic ops,
-// excludes Emscripten and single-threaded builds).
-// ============================================================================
-
-#ifdef HXCPP_CONCURRENT_MARKING
-   #if HX_HAS_ATOMIC && !defined(EMSCRIPTEN) && !defined(HXCPP_SINGLE_THREADED_APP)
-      #define HX_CONCURRENT_MARKING_ENABLED 1
-   #else
-      #warning "HXCPP_CONCURRENT_MARKING requires HX_HAS_ATOMIC, non-EMSCRIPTEN, non-single-threaded - disabled."
-      #undef HXCPP_CONCURRENT_MARKING
-   #endif
-#endif
-
-#ifdef HX_CONCURRENT_MARKING_ENABLED
-
-// True while Phase B (concurrent transitive marking) is active.
-// Mutators sample this in their write-barrier fast path.
-static volatile bool sgConcurrentMarkingInProgress = false;
-
-// Objects whose fields were modified during concurrent marking.
-// Guarded by sConcurrentDirtyLock.  Rescanned in Phase C.
-static std::mutex                sConcurrentDirtyLock;
-static hx::QuickVec<hx::Object *> sConcurrentDirtySet;
-
-// Coarse-grained card table for dirty tracking.
-// Each byte covers CONCURRENT_CARD_SIZE bytes of the heap.  During Phase C,
-// all marked objects that live in a dirty card are re-traced to pick up
-// any children that were installed after their parent was first visited.
-static const size_t CONCURRENT_CARD_SIZE_BITS = 9;          // 512 B
-static const size_t CONCURRENT_CARD_SIZE      = 1u << CONCURRENT_CARD_SIZE_BITS;
-static hx::QuickVec<unsigned char> sConcurrentCardTable;
-static size_t sConcurrentCardTableBlocks = 0;
-
-// Grow the card table to cover all allocated Immix blocks.
-// Called once per collection before Phase B starts.
-static void EnsureConcurrentCardTable(size_t inBlockCount)
-{
-   if (inBlockCount <= sConcurrentCardTableBlocks)
-      return;
-
-   size_t neededCards = (inBlockCount << IMMIX_BLOCK_BITS) >> CONCURRENT_CARD_SIZE_BITS;
-   sConcurrentCardTable.setSize((int)neededCards);
-   sConcurrentCardTableBlocks = inBlockCount;
-
-   // Zero the whole table (cheap - a few KB even for large heaps).
-   for (size_t i = 0; i < neededCards; i++)
-      sConcurrentCardTable[i] = 0;
-}
-
-#endif // HX_CONCURRENT_MARKING_ENABLED
 
 enum ThreadPoolJob
 {
@@ -2140,7 +2056,6 @@ public:
                 }
                 #endif
 
-               
                 obj->__Mark(this);
                 #ifdef HX_MULTI_THREAD_MARKING
                 // Load balance
@@ -2163,87 +2078,6 @@ public:
        }
     }
 };
-
-// ============================================================================
-// Concurrent Marking - Write Barriers (OPTIONAL OPTIMISATION)
-// ============================================================================
-// The concurrent marker is CORRECT BY DEFAULT without any write barriers.
-// Phase C performs a full-heap rescan of all marked containers, which
-// catches every mutation that occurred during the concurrent phase.
-//
-// Write barriers are an OPTIONAL performance optimisation only.  When
-// present they allow Phase C to skip the full-heap scan and instead rescan
-// only the objects that were actually modified (the "dirty set").
-//
-// Three ways to use this API:
-//
-//  1. Do nothing.  The GC works correctly out of the box.  Phase C will
-//     rescan every marked container — still correct, slightly longer STW.
-//
-//  2. Call HX_CONCURRENT_WB(obj) from HXCPP code-gen or hand-written C++
-//     before any reference field store.  Phase C then rescans only the
-//     recorded dirty objects (fast path).
-//
-//  3. Call hx::ConcurrentWriteBarrierAddr(addr) from native extensions
-//     that store references outside normal HXCPP objects.
-//
-// In all cases the GC remains correct; the barrier only affects Phase C
-// duration.
-// ============================================================================
-
-#ifdef HX_CONCURRENT_MARKING_ENABLED
-
-// Fast check: is concurrent marking currently active?
-// Hot-path check in mutator write barriers.  Uses a volatile read so the
-// compiler does not cache the value across a loop that contains stores.
-inline bool IsConcurrentMarkActive()
-{
-   return sgConcurrentMarkingInProgress;
-}
-
-// Write barrier: record that a container object's fields were modified.
-//
-// Call this before or after the field store in mutator code:
-//
-//   HX_CONCURRENT_WB(myObj);       // macro expands to this call
-//   myObj->field = newValue;
-//
-// The function is a no-op when concurrent marking is not in progress, making
-// the barrier essentially free during normal execution (one branch).
-void ConcurrentWriteBarrier(hx::Object *inContainer)
-{
-   if (!inContainer || !sgConcurrentMarkingInProgress)
-      return;
-
-   // Record the container in the precise dirty set (rescanned in Phase C).
-   {
-      std::lock_guard<std::mutex> l(sConcurrentDirtyLock);
-      sConcurrentDirtySet.push(inContainer);
-   }
-
-   // Also dirty the card-table entry.  A single byte write is atomic on
-   // every supported platform and needs no lock.
-   size_t cardIdx = (size_t)inContainer >> CONCURRENT_CARD_SIZE_BITS;
-   if (cardIdx < (size_t)sConcurrentCardTable.size())
-      sConcurrentCardTable[cardIdx] = 1;
-}
-
-// Write barrier variant for raw pointer addresses (e.g. arrays or structs
-// that are not derived from hx::Object but contain embedded references).
-inline void ConcurrentWriteBarrierAddr(void *inAddr)
-{
-   if (!inAddr || !sgConcurrentMarkingInProgress)
-      return;
-   size_t cardIdx = (size_t)inAddr >> CONCURRENT_CARD_SIZE_BITS;
-   if (cardIdx < (size_t)sConcurrentCardTable.size())
-      sConcurrentCardTable[cardIdx] = 1;
-}
-
-// Convenience macro for use in generated HXCPP mutator code.
-// Insert before any reference field store during concurrent marking.
-#define HX_CONCURRENT_WB(container) hx::ConcurrentWriteBarrier(container)
-
-#endif // HX_CONCURRENT_MARKING_ENABLED
 
 
 /*
@@ -4024,11 +3858,7 @@ public:
             continue;
          }
 
-         #ifdef HX_CONCURRENT_MARKING_ENABLED
-         if (hx::gPauseForCollect && !sgConcurrentMarkingInProgress)
-         #else
          if (hx::gPauseForCollect)
-         #endif
          {
             hx::PauseForCollect();
             continue;
@@ -4049,33 +3879,6 @@ public:
                result = GetNextFree(inRequiredBytes);
          }
 
-         #ifdef HX_CONCURRENT_MARKING_ENABLED
-         // During Phase B of concurrent marking, do NOT trigger a new GC
-         // cycle — the concurrent collector is already running.  Instead,
-         // try to allocate more OS memory.  If that also fails, the
-         // mutator must wait for Phase B to finish.
-         if (!result && sgConcurrentMarkingInProgress)
-         {
-            bool dummy = true;
-            if (!AllocMoreBlocks(dummy, false))
-               result = GetNextFree(inRequiredBytes);
-            if (!result)
-            {
-               // Spin briefly — Phase B is typically < 1 ms.
-               for (int spin = 0; spin < 1000; spin++)
-               {
-                  result = GetNextFree(inRequiredBytes);
-                  if (result) break;
-                  #ifdef _WIN32
-                  Sleep(0);
-                  #else
-                  sched_yield();
-                  #endif
-               }
-            }
-         }
-         else
-         #endif
          if (!result)
          {
             inAlloc->SetupStackAndCollect(false,forceCompact,true,true);
@@ -4086,9 +3889,6 @@ public:
          {
             // Try with compact this time...
             forceCompact = true;
-            #ifdef HX_CONCURRENT_MARKING_ENABLED
-            if (!sgConcurrentMarkingInProgress)
-            #endif
             inAlloc->SetupStackAndCollect(false,forceCompact,true,true);
             result = GetNextFree(inRequiredBytes);
          }
@@ -5124,447 +4924,6 @@ public:
    // Line-profile timestamps for MarkAll sub-phases (always present so Collect
    // can read them without #ifdef mess; they're only written under HXCPP_GC_LINE_PROFILE).
    double tMA_entry, tMA_afterInit, tMA_afterRoots, tMA_afterLocal, tMA_afterTransitive, tMA_afterFinalizers, tMA_exit;
-
-   // Additional timestamps for concurrent marking phases
-   double tCM_phaseA_end = 0;  // end of root marking (STW)
-   double tCM_phaseB_end = 0;  // end of concurrent transitive marking
-   double tCM_phaseC_start = 0; // start of Phase C rescan (STW)
-
-   // -----------------------------------------------------------------------
-   // Phase A (STW): Clear marks and mark all roots.
-   //   - Rotates mark IDs (non-generational) or clears block marks (gen).
-   //   - Marks class statics, root set, zombies, and every thread's stack.
-   //   - Fills the mark stack but does NOT drain it.
-   // -----------------------------------------------------------------------
-   void MarkRootsPhase(bool inGenerational)
-   {
-      GC_LP_SET(tMA_entry);
-
-      if (!inGenerational)
-      {
-         hx::gPrevByteMarkID = hx::gByteMarkID;
-         hx::gPrevMarkIdMask = ((~hx::gMarkID) & 0x30000000) | HX_GC_CONST_ALLOC_BIT;
-
-         gByteMarkID = (gByteMarkID + 1) & 0x0f;
-         if (gByteMarkID & 0x1)
-            gByteMarkID |= 0x20;
-         else
-            gByteMarkID |= 0x10;
-
-         hx::gMarkID = gByteMarkID << 24;
-         hx::gMarkIDWithContainer = (gByteMarkID << 24) | IMMIX_ALLOC_IS_CONTAINER;
-         gRememberedByteMarkID = gByteMarkID | HX_GC_REMEMBERED;
-
-         #ifdef HX_WATCH
-         GCLOG(" non-gen mark byte -> %02x\n", hx::gByteMarkID);
-         #endif
-         gBlockStack = 0;
-         ClearRowMarks();
-      }
-      else
-      {
-         #ifdef HX_WATCH
-         GCLOG(" generational mark byte -> %02x\n", hx::gByteMarkID);
-         #endif
-         ClearBlockMarks();
-      }
-
-      MEM_STAMP(tMarkInit);
-      GC_LP_SET(tMA_afterInit);
-
-      #ifdef PROFILE_THREAD_USAGE
-      for(int i=-1;i<MAX_GC_THREADS;i++)
-         sThreadChunkPushCount = sThreadChunkWakes = sThreadMarkCount[i] = sThreadArrayMarkCount[i] = 0;
-      #endif
-
-      mMarker.init();
-
-      hx::MarkClassStatics(&mMarker);
-
-      {
-      hx::AutoMarkPush info(&mMarker,"Roots","root");
-
-      for(hx::RootSet::iterator i = hx::sgRootSet.begin(); i!=hx::sgRootSet.end(); ++i)
-      {
-         hx::Object *&obj = **i;
-         if (obj)
-            hx::MarkObjectAlloc(obj , &mMarker );
-      }
-
-      if (hx::sgOffsetRootSet)
-         for(hx::OffsetRootSet::iterator i = hx::sgOffsetRootSet->begin(); i!=hx::sgOffsetRootSet->end(); ++i)
-         {
-            char *ptr = *(char **)(i->first);
-            int offset = i->second;
-            hx::Object *obj = (hx::Object *)(ptr - offset);
-
-            if (obj)
-               hx::MarkObjectAlloc(obj , &mMarker );
-         }
-      } // automark
-
-      #ifdef PROFILE_COLLECT
-      hx::rootObjects = sObjectMarks;
-      hx::rootAllocs = sAllocMarks;
-      #endif
-
-
-      {
-      hx::AutoMarkPush info(&mMarker,"Zombies","zombie");
-      // Mark zombies too....
-      for(int i=0;i<hx::sZombieList.size();i++)
-         hx::MarkObjectAlloc(hx::sZombieList[i] , &mMarker );
-      } // automark
-
-      MEM_STAMP(tMarkLocal);
-      GC_LP_SET(tMA_afterRoots);
-      hx::localCount = 0;
-
-      mMarker.isGenerational = inGenerational;
-
-      // Mark local stacks
-      for(int i=0;i<mLocalAllocs.size();i++)
-         MarkLocalAlloc(mLocalAllocs[i] , &mMarker);
-
-      #ifdef PROFILE_COLLECT
-      hx::localObjects = sObjectMarks;
-      hx::localAllocs = sAllocMarks;
-      #endif
-
-      MEM_STAMP(tMarkLocalEnd);
-      GC_LP_SET(tMA_afterLocal);
-   }
-
-   // -----------------------------------------------------------------------
-   // Transitive phase: drain the mark stack.
-   //   When HX_MULTI_THREAD_MARKING is defined this uses the worker thread
-   //   pool (parallel); otherwise it runs single-threaded.
-   //   In the concurrent path this executes WHILE mutators are running.
-   // -----------------------------------------------------------------------
-   void MarkTransitivePhase()
-   {
-      #ifdef HX_MULTI_THREAD_MARKING
-         mMarker.releaseJobs();
-         StartThreadJobs(tpjMark, MAX_GC_THREADS, true);
-      #else
-         mMarker.processMarkStack();
-      #endif
-
-      MEM_STAMP(tMarked);
-      GC_LP_SET(tMA_afterTransitive);
-   }
-
-   // -----------------------------------------------------------------------
-   // Phase C (STW): rescan to catch mutations from the concurrent phase.
-   //
-   // CORRECTNESS WITHOUT WRITE BARRIERS
-   // ================================
-   // This function is correct even if NO mutator called a write barrier
-   // during Phase B.  When the dirty set is empty (no barriers fired) we
-   // fall back to a full-heap rescan: every marked container in every
-   // Immix block is re-__Mark()'d.  Re-tracing an already-marked object
-   // is nearly free — MarkObjectAlloc sees the mark byte is set and
-   // returns immediately — so the actual work is proportional only to
-   // the number of *mutated* objects, not the total live heap.
-   //
-   // OPTIMISED PATH (when write barriers are present)
-   // =============================================
-   // If the dirty set is non-empty, Phase C skips the full-heap scan
-   // and instead rescans only the recorded dirty objects.  The card
-   // table provides a second, coarser level of filtering for native
-   // code that dirtied cards via ConcurrentWriteBarrierAddr() but did
-   // not record a precise dirty object.
-   // -----------------------------------------------------------------------
-   #ifdef HX_CONCURRENT_MARKING_ENABLED
-   void RescanConcurrentDirty()
-   {
-      mMarker.init();
-
-      // --- 0. Decide: precise rescan or full-heap rescan? ---
-      int dirtyCount = 0;
-      {
-         std::lock_guard<std::mutex> l(sConcurrentDirtyLock);
-         dirtyCount = sConcurrentDirtySet.size();
-      }
-
-      if (dirtyCount > 0)
-      {
-         // ---- Optimised path: rescan only dirty objects ----
-
-         // Precise dirty set
-         {
-            std::lock_guard<std::mutex> l(sConcurrentDirtyLock);
-            for (int i = 0; i < sConcurrentDirtySet.size(); i++)
-            {
-               hx::Object *obj = sConcurrentDirtySet[i];
-               if (obj && ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE] == gByteMarkID)
-                  obj->__Mark(&mMarker);
-            }
-            sConcurrentDirtySet.clear();
-         }
-
-         // Card table rescan: walk blocks with dirty cards, re-trace
-         // all marked containers inside them (catches native-code stores).
-         if (sConcurrentCardTable.size() > 0)
-         {
-            for (int b = 0; b < mAllBlocks.size(); b++)
-            {
-               char *blockBase = (char *)mAllBlocks[b]->mPtr;
-               size_t blockStart = (size_t)blockBase;
-               size_t blockEnd   = blockStart + IMMIX_BLOCK_SIZE;
-               size_t cardLo = blockStart >> CONCURRENT_CARD_SIZE_BITS;
-               size_t cardHi = blockEnd   >> CONCURRENT_CARD_SIZE_BITS;
-
-               bool hasDirty = false;
-               for (size_t c = cardLo; c < cardHi && c < (size_t)sConcurrentCardTable.size(); c++)
-               {
-                  if (sConcurrentCardTable[c]) { hasDirty = true; break; }
-               }
-               if (!hasDirty)
-                  continue;
-
-               unsigned char *rowMarked = (unsigned char *)blockBase;
-               for (int r = 2; r < IMMIX_LINES; r++)
-               {
-                  if (!rowMarked[r]) continue;
-                  char *rowAddr = blockBase + (r << IMMIX_LINE_BITS);
-                  for (int offset = 0; offset < IMMIX_LINE_LEN; )
-                  {
-                     unsigned int header = *(unsigned int *)(rowAddr + offset);
-                     if ((header & IMMIX_ALLOC_MARK_ID) != (unsigned int)hx::gMarkID)
-                     {
-                        int rows = header & IMMIX_ALLOC_ROW_COUNT;
-                        offset += (rows ? rows : 1) << IMMIX_LINE_BITS;
-                        continue;
-                     }
-                     if (header & IMMIX_ALLOC_IS_CONTAINER)
-                     {
-                        hx::Object *obj = (hx::Object *)(rowAddr + offset + sizeof(int));
-                        obj->__Mark(&mMarker);
-                     }
-                     int rows = header & IMMIX_ALLOC_ROW_COUNT;
-                     offset += (rows ? rows : 1) << IMMIX_LINE_BITS;
-                  }
-               }
-            }
-            for (size_t c = 0; c < (size_t)sConcurrentCardTable.size(); c++)
-               sConcurrentCardTable[c] = 0;
-         }
-      }
-      else
-      {
-         // ---- Automatic fallback: full-heap rescan ----
-         // No write barriers fired during Phase B, so we don't know which
-         // objects were mutated.  Rescan EVERY marked container.  This is
-         // correct by construction and requires zero mutator cooperation.
-
-         #ifdef SHOW_MEM_EVENTS
-         GCLOG("  Phase C: full-heap rescan (no write barriers)\n");
-         #endif
-
-         // Scan all Immix blocks for marked containers.
-         for (int b = 0; b < mAllBlocks.size(); b++)
-         {
-            char *blockBase = (char *)mAllBlocks[b]->mPtr;
-            unsigned char *rowMarked = (unsigned char *)blockBase;
-
-            for (int r = 2; r < IMMIX_LINES; r++)
-            {
-               if (!rowMarked[r])
-                  continue;
-
-               char *rowAddr = blockBase + (r << IMMIX_LINE_BITS);
-               for (int offset = 0; offset < IMMIX_LINE_LEN; )
-               {
-                  unsigned int header = *(unsigned int *)(rowAddr + offset);
-                  if ((header & IMMIX_ALLOC_MARK_ID) != (unsigned int)hx::gMarkID)
-                  {
-                     int rows = header & IMMIX_ALLOC_ROW_COUNT;
-                     offset += (rows ? rows : 1) << IMMIX_LINE_BITS;
-                     continue;
-                  }
-
-                  // Re-trace every marked container to catch mutations.
-                  if (header & IMMIX_ALLOC_IS_CONTAINER)
-                  {
-                     hx::Object *obj = (hx::Object *)(rowAddr + offset + sizeof(int));
-                     obj->__Mark(&mMarker);
-                  }
-
-                  int rows = header & IMMIX_ALLOC_ROW_COUNT;
-                  offset += (rows ? rows : 1) << IMMIX_LINE_BITS;
-               }
-            }
-         }
-
-         // Also scan large objects (they live outside Immix blocks).
-         for (int i = 0; i < mLargeList.size(); i++)
-         {
-            unsigned int *blob = mLargeList[i];
-            unsigned int header = blob[1];
-            if ((header & IMMIX_ALLOC_MARK_ID) != (unsigned int)hx::gMarkID)
-               continue;
-            if (header & IMMIX_ALLOC_IS_CONTAINER)
-            {
-               hx::Object *obj = (hx::Object *)(blob + 2);
-               obj->__Mark(&mMarker);
-            }
-         }
-      }
-
-      // --- Always rescan roots (they may have changed during Phase B) ---
-      hx::MarkClassStatics(&mMarker);
-      for(hx::RootSet::iterator i = hx::sgRootSet.begin(); i!=hx::sgRootSet.end(); ++i)
-      {
-         hx::Object *&obj = **i;
-         if (obj)
-            hx::MarkObjectAlloc(obj, &mMarker);
-      }
-      if (hx::sgOffsetRootSet)
-         for(hx::OffsetRootSet::iterator i = hx::sgOffsetRootSet->begin(); i!=hx::sgOffsetRootSet->end(); ++i)
-         {
-            char *ptr = *(char **)(i->first);
-            int offset = i->second;
-            hx::Object *obj = (hx::Object *)(ptr - offset);
-            if (obj)
-               hx::MarkObjectAlloc(obj, &mMarker);
-         }
-
-      // --- Re-scan local stacks (mutators pushed new refs during Phase B) ---
-      // WaitForSafe already updated each thread's mBottomOfStack, so
-      // MarkLocalAlloc will see the current stack extent.
-      for(int i=0;i<mLocalAllocs.size();i++)
-         MarkLocalAlloc(mLocalAllocs[i], &mMarker);
-
-      // --- Drain anything the rescan pushed ---
-      #ifdef HX_MULTI_THREAD_MARKING
-         mMarker.releaseJobs();
-         StartThreadJobs(tpjMark, MAX_GC_THREADS, true);
-      #else
-         mMarker.processMarkStack();
-      #endif
-   }
-   #endif // HX_CONCURRENT_MARKING_ENABLED
-
-   // -----------------------------------------------------------------------
-   // Phase C finalization: find zombies, run finalizers, verify marks.
-   //   Runs in both the normal (STW) and concurrent paths.
-   // -----------------------------------------------------------------------
-   void MarkFinalizePhase()
-   {
-      hx::FindZombies(mMarker);
-
-      hx::RunFinalizers(&mMarker);
-      GC_LP_SET(tMA_afterFinalizers);
-
-      #ifdef HXCPP_GC_VERIFY
-      for(int i=0;i<mAllBlocks.size();i++)
-         mAllBlocks[i]->verify("After mark");
-      #endif
-
-      #ifdef HX_WATCH
-      for(void **watch = hxWatchList; *watch; watch++)
-      {
-         GCLOG("********* Watch mark : %p %08x\n",*watch, ((unsigned int *)*watch)[-1]);
-         GCLOG(" ******** is marked  : %d\n", (((unsigned char *)(*watch))[HX_ENDIAN_MARK_ID_BYTE]== gByteMarkID));
-      }
-      #endif
-   }
-
-   // -----------------------------------------------------------------------
-   // ConcurrentMarkAll: three-phase marking that overlaps transitive
-   //   traversal with mutator execution.
-   //
-   //   Phase A (STW): MarkRootsPhase  - capture all roots into the mark stack.
-   //   Phase B (concurrent): Release mutators; MarkTransitivePhase while
-   //          application threads run.  Write barriers record dirty objects.
-   //   Phase C (STW): Re-stop mutators; RescanConcurrentDirty to catch
-   //          mutations; MarkFinalizePhase for zombies + finalizers.
-   //
-   // PRECONDITION: All mutator threads are already stopped (WaitForSafe).
-   // POSTCONDITION: All mutator threads are stopped again (for sweep).
-   // -----------------------------------------------------------------------
-   #ifdef HX_CONCURRENT_MARKING_ENABLED
-   void ConcurrentMarkAll(bool inGenerational)
-   {
-      #ifdef SHOW_MEM_EVENTS
-      GCLOG("=== ConcurrentMarkAll (gen=%d) ===\n", (int)inGenerational);
-      #endif
-
-      // --- Phase A: mark roots (STW, mutators already stopped) ---
-      MarkRootsPhase(inGenerational);
-      GC_LP_SET(tCM_phaseA_end);
-
-      // Prepare the card table before releasing mutators.
-      EnsureConcurrentCardTable(mAllBlocks.size());
-
-      // --- Transition: release mutators for Phase B ---
-      // Clear GC state so mutators can allocate freely during Phase B.
-      // sgConcurrentMarkingInProgress is set FIRST so that the guard in
-      // Collect() can reject re-entrant collection attempts even if a
-      // mutator races between reading the flag and the CAS on gPauseForCollect.
-      sgConcurrentMarkingInProgress = true;
-      std::atomic_thread_fence(std::memory_order_release);
-      sgIsCollecting = false;
-      hx::gPauseForCollect = 0;
-
-      #ifndef HXCPP_SINGLE_THREADED_APP
-      LocalAllocator *this_local = (LocalAllocator *)(hx::ImmixAllocator *)hx::tlsStackContext;
-      for(int i=0;i<mLocalAllocs.size();i++)
-      {
-         if (mLocalAllocs[i] != this_local)
-            ReleaseFromSafe(mLocalAllocs[i]);
-      }
-      #endif
-
-      #ifdef SHOW_MEM_EVENTS
-      GCLOG("  Phase B: concurrent marking started\n");
-      #endif
-
-      MarkTransitivePhase();
-
-      // Ensure all mark-thread writes are visible before we clear the flag.
-      std::atomic_thread_fence(std::memory_order_acquire);
-      sgConcurrentMarkingInProgress = false;
-
-      GC_LP_SET(tCM_phaseB_end);
-
-      #ifdef SHOW_MEM_EVENTS
-      GCLOG("  Phase B: concurrent marking finished\n");
-      #endif
-
-      // --- Transition: re-stop mutators for Phase C ---
-      // Restore gPauseForCollect FIRST (so any racing mutator CAS fails),
-      // then clear the concurrent flag.  This ordering closes the window
-      // where both flags are clear and a mutator could start a second GC.
-      hx::gPauseForCollect = 0xffffffff;
-      sgIsCollecting = true;
-      std::atomic_thread_fence(std::memory_order_release);
-      sgConcurrentMarkingInProgress = false;
-
-      #ifndef HXCPP_SINGLE_THREADED_APP
-      for(int i=0;i<mLocalAllocs.size();i++)
-      {
-         if (mLocalAllocs[i] != this_local)
-            WaitForSafe(mLocalAllocs[i]);
-      }
-      #endif
-
-      GC_LP_SET(tCM_phaseC_start);
-
-      // --- Phase C: rescan dirty objects and finalize ---
-      RescanConcurrentDirty();
-      MarkFinalizePhase();
-
-      #ifdef SHOW_MEM_EVENTS
-      GCLOG("=== ConcurrentMarkAll done ===\n");
-      #endif
-   }
-   #endif // HX_CONCURRENT_MARKING_ENABLED
-
-   // -----------------------------------------------------------------------
-   // MarkAll (original STW path - unchanged when concurrent marking is off)
-   // -----------------------------------------------------------------------
    void MarkAll(bool inGenerational)
    {
       GC_LP_SET(tMA_entry);
@@ -5736,9 +5095,7 @@ public:
 
    void Collect(bool inMajor, bool inForceCompact, bool inLocked,bool inFreeIsFragged)
    {
-      #ifdef HXCPP_GC_LINE_PROFILE
-      // Unconditional smoke trace — fires on EVERY Collect call regardless of defines.
-      // Remove once you've confirmed collection is happening.
+      #if HXCPP_GC_LINE_PROFILE
       fprintf(stderr, "[gc.profile] Collect(major=%d, force=%d) called\n",
               (int)inMajor, (int)inForceCompact);
       fflush(stderr);
@@ -5757,14 +5114,6 @@ public:
       PROFILE_COLLECT_SUMMARY_START;
 
       #ifndef HXCPP_SINGLE_THREADED_APP
-      // During Phase B of concurrent marking, gPauseForCollect is cleared to 0
-      // so mutators can allocate.  Reject re-entrant collection here — the
-      // caller (allocation path) will retry once Phase B finishes.
-      #ifdef HX_CONCURRENT_MARKING_ENABLED
-      if (sgConcurrentMarkingInProgress)
-         return;
-      #endif
-
       // If we set the flag from 0 -> 0xffffffff then we are the collector
       //  otherwise, someone else is collecting at the moment - so wait...
       if (_hx_atomic_compare_exchange((volatile int *)&hx::gPauseForCollect, 0, 0xffffffff) != 0)
@@ -5881,16 +5230,9 @@ public:
 
       STAMP(t1)
 
-      #ifdef HX_CONCURRENT_MARKING_ENABLED
-         // Concurrent marking: Phase A (STW roots) + Phase B (concurrent
-         // transitive) + Phase C (STW rescan+finalize).  Mutators are
-         // released between A and C, reducing total STW pause time.
-         ConcurrentMarkAll(generational);
-      #else
-         MarkAll(generational);
-      #endif
+      MarkAll(generational);
 
-      GC_LP_SET(lp_t6);  // after MarkAll / ConcurrentMarkAll
+      GC_LP_SET(lp_t6);  // after MarkAll
 
       #ifdef HX_GC_VERIFY_GENERATIONAL
       {
@@ -6387,12 +5729,6 @@ public:
          GCLOG("  [04] telemetry + fragRows      %8.3f ms\n", GC_LP_MS(lp_t3, lp_t4));
          GCLOG("  [05] gen remembered-set patch  %8.3f ms\n", GC_LP_MS(lp_t4, lp_t5));
          GCLOG("  [06] MarkAll TOTAL             %8.3f ms\n", GC_LP_MS(lp_t5, lp_t6));
-         #ifdef HX_CONCURRENT_MARKING_ENABLED
-         GCLOG("       [06-concurrent] Phase A (roots, STW)    %8.3f ms\n", GC_LP_MS(tMA_entry, tCM_phaseA_end));
-         GCLOG("       [06-concurrent] Phase B (transitive)    %8.3f ms  (concurrent with mutators)\n", GC_LP_MS(tCM_phaseA_end, tCM_phaseB_end));
-         GCLOG("       [06-concurrent] Phase C gap (re-stop)   %8.3f ms\n", GC_LP_MS(tCM_phaseB_end, tCM_phaseC_start));
-         GCLOG("       [06-concurrent] Phase C (rescan+fin)    %8.3f ms\n", GC_LP_MS(tCM_phaseC_start, tMA_afterFinalizers));
-         #else
          GCLOG("       [06a] mark init+clr       %8.3f ms\n", GC_LP_MS(tMA_entry, tMA_afterInit));
          GCLOG("       [06b] mark roots+zombies  %8.3f ms\n", GC_LP_MS(tMA_afterInit, tMA_afterRoots));
          GCLOG("       [06c] mark local stacks   %8.3f ms\n", GC_LP_MS(tMA_afterRoots, tMA_afterLocal));
@@ -6400,7 +5736,6 @@ public:
          GCLOG("       [06e] zombies+finalizers  %8.3f ms  (FindZombies=%.3f zombies=%d)\n",
                GC_LP_MS(tMA_afterTransitive, tMA_afterFinalizers),
                GC_LP_MS(gFZ_t0, gFZ_t1), gFZ_nZombies);
-         #endif // HX_CONCURRENT_MARKING_ENABLED
          GCLOG("             [06e-f1] sgFinalizers    %8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t0, gRF_t1), gRF_nFinalizers, gRF_killedFinalizers);
          GCLOG("             [06e-f2] sFinalizableList%8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t1, gRF_t2), gRF_nFinalizable, gRF_killedFinalizable);
          GCLOG("             [06e-f3] sFinalizerMap   %8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t2, gRF_t3), gRF_nFinalizerMap, gRF_killedFinalizerMap);
@@ -7089,14 +6424,6 @@ public:
       VerifyStackRead(mBottomOfStack, mTopOfStack)
       #endif
 
-      #ifdef HX_CONCURRENT_MARKING_ENABLED
-      // During Phase B of concurrent marking, mutators are allowed to run
-      // and allocate.  Update the stack pointer (harmless) and return
-      // immediately — do NOT block or crash.
-      if (sgConcurrentMarkingInProgress)
-         return;
-      #endif
-
       if (sgIsCollecting)
          CriticalGCError("Bad Allocation while collecting - from finalizer?");
 
@@ -7331,13 +6658,8 @@ public:
       if (mGCFreeZone)
          CriticalGCError("Allocating from a GC-free thread");
       #endif
-      #ifdef HX_CONCURRENT_MARKING_ENABLED
-      if (hx::gPauseForCollect && !sgConcurrentMarkingInProgress)
-         PauseForCollect();
-      #else
       if (hx::gPauseForCollect)
          PauseForCollect();
-      #endif
       #endif
 
       if (inSize==0)
@@ -7465,11 +6787,7 @@ public:
 
          // Other thread may have started collect, in which case we may just
          //  overwritted the 'mMoreHoles' and 'spaceEnd' termination attempt
-         #ifdef HX_CONCURRENT_MARKING_ENABLED
-         if (hx::gPauseForCollect && !sgConcurrentMarkingInProgress)
-         #else
          if (hx::gPauseForCollect)
-         #endif
          {
             mMoreHoles = 0;
             #ifdef HXCPP_GC_NURSERY
