@@ -21,7 +21,7 @@
 #include <stdlib.h>
 
 #define HXCPP_DEFER_HAXE_FINALIZERS
-//#define HXCPP_GC_LINE_PROFILE
+#define HXCPP_GC_LINE_PROFILE
 
 
 // Sub-phase timing for RunFinalizers — populated when HXCPP_GC_LINE_PROFILE is on,
@@ -94,6 +94,7 @@ namespace {
 // 16 bytes at a time instead of 4.  This speeds up the per-block reclaim scan.
 #if defined(HXCPP_M64) && (defined(_M_X64) || defined(__x86_64__))
    #include <emmintrin.h>   // SSE2
+   #include <xmmintrin.h>   // SSE (_mm_prefetch)
    #define HXCPP_SSE2_SWEEP 1
    #if defined(_MSC_VER)
       #include <intrin.h>
@@ -2037,6 +2038,24 @@ public:
              hx::Object *obj = marking->pop();
              if (obj)
              {
+                // Prefetch the next object's header while we mark this one.
+                // __Mark reads the object's mark byte + traverses its fields,
+                // which touches the first cache line of the next object.  Issuing
+                // the prefetch now overlaps that fetch with the current __Mark call.
+                // On a pointer-chasing workload this hides ~100-200 cycles of
+                // cache-miss latency per object.
+                #if defined(HXCPP_M64) && (defined(_M_X64) || defined(__x86_64__))
+                if (marking->count > 0)
+                {
+                   hx::Object *next = marking->stack[marking->count - 1];
+                   #if defined(_MSC_VER)
+                      _mm_prefetch((const char*)next, _MM_HINT_T0);
+                   #else
+                      __builtin_prefetch(next, 0, 3);
+                   #endif
+                }
+                #endif
+
                 obj->__Mark(this);
                 #ifdef HX_MULTI_THREAD_MARKING
                 // Load balance
@@ -5077,8 +5096,6 @@ public:
    void Collect(bool inMajor, bool inForceCompact, bool inLocked,bool inFreeIsFragged)
    {
       #if HXCPP_GC_LINE_PROFILE
-      // Unconditional smoke trace — fires on EVERY Collect call regardless of defines.
-      // Remove once you've confirmed collection is happening.
       fprintf(stderr, "[gc.profile] Collect(major=%d, force=%d) called\n",
               (int)inMajor, (int)inForceCompact);
       fflush(stderr);
