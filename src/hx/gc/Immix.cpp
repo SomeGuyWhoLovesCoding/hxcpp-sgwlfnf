@@ -8,6 +8,8 @@
 #include <hx/Unordered.h>
 #include <mutex>
 #include <condition_variable>
+#include <stdexcept>
+#include <unordered_map>
 
 #ifdef EMSCRIPTEN
    #include <emscripten/stack.h>
@@ -1044,9 +1046,11 @@ struct BlockDataInfo
          sum_vec = _mm_add_epi64(sum_vec, _mm_sad_epu8(v, zero));
       }
       
-      // Horizontal add of the two 64-bit integers in the XMM register
-      uint64_t low = _mm_extract_epi64(sum_vec, 0);
-      uint64_t high = _mm_extract_epi64(sum_vec, 1);
+      // Horizontal add of the two 64-bit integers in the XMM register      
+      uint64_t tmp[2];
+      _mm_storeu_si128((__m128i*)tmp, sum_vec);
+      uint64_t low  = tmp[0];
+      uint64_t high = tmp[1];
       total = (unsigned int)(low + high);
 
    #else
@@ -2568,11 +2572,11 @@ typedef hx::QuickVec<InternalFinalizer *> FinalizerList;
 
 FILE_SCOPE FinalizerList *sgFinalizers = 0;
 
-typedef hx::UnorderedMap<hx::Object *,hx::finalizer> FinalizerMap;
+typedef std::unordered_map<hx::Object *,hx::finalizer> FinalizerMap;
 FILE_SCOPE FinalizerMap sFinalizerMap;
 
 typedef void (*HaxeFinalizer)(Dynamic);
-typedef hx::UnorderedMap<hx::Object *,HaxeFinalizer> HaxeFinalizerMap;
+typedef std::unordered_map<hx::Object *,HaxeFinalizer> HaxeFinalizerMap;
 FILE_SCOPE HaxeFinalizerMap sHaxeFinalizerMap;
 
 // --- Deferred finalizer queue ---
