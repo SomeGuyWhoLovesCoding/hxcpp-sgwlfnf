@@ -3,13 +3,13 @@
 #include <hx/GC.h>
 #include <hx/Memory.h>
 #include <hx/Thread.h>
-#include <hx/thread/Thread.hpp>
 #include "../Hash.h"
 #include "GcRegCapture.h"
 #include <hx/Unordered.h>
 #include <mutex>
-#include <thread>
 #include <condition_variable>
+#include <stdexcept>
+#include <unordered_map>
 
 #ifdef EMSCRIPTEN
    #include <emscripten/stack.h>
@@ -22,8 +22,120 @@
 #include <string>
 #include <stdlib.h>
 
+#define HXCPP_DEFER_HAXE_FINALIZERS
+//#define HXCPP_GC_LINE_PROFILE
+
+
+// Sub-phase timing for RunFinalizers — populated when HXCPP_GC_LINE_PROFILE is on,
+// read by Collect()'s printout.  Always present to avoid #ifdef in the class.
+double gRF_t0=0, gRF_t1=0, gRF_t2=0, gRF_t3=0, gRF_t4=0, gRF_t5=0, gRF_t6=0, gRF_t7=0, gRF_t8=0;
+int gRF_nFinalizers=0, gRF_nFinalizable=0, gRF_nFinalizerMap=0, gRF_nHaxeFinalizerMap=0;
+int gRF_nObjectIdMap=0, gRF_nWeakHash=0, gRF_nWeakRefs=0;
+int gRF_killedFinalizers=0, gRF_killedFinalizable=0, gRF_killedFinalizerMap=0;
+int gRF_killedHaxeFinalizerMap=0, gRF_killedObjectIdMap=0, gRF_killedWeakHash=0, gRF_killedWeakRefs=0;
+double gFZ_t0=0, gFZ_t1=0;
+int gFZ_nZombies=0;
+
+
+// ============================================================================
+// Deferred finalizer queue — FULL DEFINITION at top of file
+// ============================================================================
+// Defined here (not forward-declared) so the type is complete at every use
+// site below, including inside class bodies and nested namespaces.
+// Uses void(*)() for the function pointer to avoid depending on later typedefs.
+// ============================================================================
+struct DeferredFinalizerEntry {
+   hx::Object *obj;
+   void (*func)(Dynamic);
+};
+
+// Accessor declarations + DEFINITIONS all at the top, at global scope.
+// MSVC requires the definition to be at the same scope as the declaration.
+namespace hx { template <typename T> class QuickVec; }
+
+// The actual data — defined here so the accessors can return references.
+// (static would make them invisible to other .cpp files that might need them,
+//  but since everything is in this one .cpp, static is fine and avoids linker
+//  issues with multiple translation units.)
+static hx::QuickVec<DeferredFinalizerEntry> sDeferredFinalizersData_;
+static int sDeferredFinalizersHighWaterData_ = 0;
+
+static inline hx::QuickVec<DeferredFinalizerEntry> &GetDeferredFinalizers() { return sDeferredFinalizersData_; }
+static inline int &GetDeferredHighWater() { return sDeferredFinalizersHighWaterData_; }
+// ============================================================================
+
 
 static bool sgIsCollecting = false;
+
+// ---------------------------------------------------------------------------
+// SMOKE TEST — runs once when this translation unit loads.
+// If you do NOT see "GC.LINE_PROFILE loaded" at program startup, then this
+// file is NOT being compiled into your binary (wrong file, build cache, etc.).
+// If you see it but no per-collect output, then Collect() isn't being called
+// OR HXCPP_GC_LINE_PROFILE isn't actually defined at compile time.
+// ---------------------------------------------------------------------------
+#include <stdio.h>
+namespace {
+   struct LineProfileLoader {
+      LineProfileLoader() {
+         fprintf(stderr, "[gc.profile] file loaded. HXCPP_GC_LINE_PROFILE=%d\n",
+#ifdef HXCPP_GC_LINE_PROFILE
+                 1
+#else
+                 0
+#endif
+                );
+         fflush(stderr);
+      }
+   };
+   LineProfileLoader gLineProfileLoader;
+}
+
+// --- SSE2 sweep helpers ---
+// On x86-64 (HXCPP_M64), SSE2 is guaranteed.  Use it to scan rowMarked[]
+// 16 bytes at a time instead of 4.  This speeds up the per-block reclaim scan.
+#if defined(HXCPP_M64) && (defined(_M_X64) || defined(__x86_64__))
+   #include <emmintrin.h>   // SSE2
+   #include <xmmintrin.h>   // SSE (_mm_prefetch)
+   #define HXCPP_SSE2_SWEEP 1
+   #if defined(_MSC_VER)
+      #include <intrin.h>
+      static inline int hx_ctz32(unsigned int x) { unsigned long r; _BitScanForward(&r, x); return (int)r; }
+   #else
+      static inline int hx_ctz32(unsigned int x) { return __builtin_ctz(x); }
+   #endif
+
+   // Scan rowMarked[r..end) for the first non-zero byte.  Returns new r.
+   static inline int hx_scan_nonzero(const unsigned char *rowMarked, int r, int end)
+   {
+      while (r + 16 <= end)
+      {
+         __m128i v = _mm_loadu_si128((const __m128i*)(rowMarked + r));
+         __m128i cmp = _mm_cmpeq_epi8(v, _mm_setzero_si128());
+         int mask = _mm_movemask_epi8(cmp);
+         // mask bit=1 means byte IS zero.  First non-zero = first 0 bit = ctz(~mask).
+         if (mask != 0xFFFF)
+         {
+            r += hx_ctz32((unsigned int)(~mask));
+            return r;
+         }
+         r += 16;
+      }
+      while (r < end && rowMarked[r] == 0)
+         r++;
+      return r;
+   }
+#else
+   // Scalar fallback: 4 bytes at a time (original pattern)
+   static inline int hx_scan_nonzero(const unsigned char *rowMarked, int r, int end)
+   {
+      while (r + 4 <= end && *(const int*)(rowMarked + r) == 0)
+         r += 4;
+      while (r < end && rowMarked[r] == 0)
+         r++;
+      return r;
+   }
+#endif
 
 namespace hx
 {
@@ -66,34 +178,6 @@ enum { gAlwaysMove = false };
 #include <stdio.h>
 
 #include <hx/QuickVec.h>
-
-#ifdef HXCPP_FUTURE_GC
-#include <atomic>
-#include <chrono>
-#endif
-
-#ifdef HXCPP_TRACY
-// Visualise GC activity in the tracy profiler:
-//  red zones    = stop-the-world work (all mutators paused)
-//  orange zones = concurrent collector work (mutators running)
-//  yellow zones = mutators waiting on the collector
-#include <hx/TelemetryTracy.h>
-#define HX_GC_TRACY_ZONE_STW(name)        ZoneScopedNC(name, 0xbb3322)
-#define HX_GC_TRACY_ZONE_CONCURRENT(name) ZoneScopedNC(name, 0xcc8833)
-#define HX_GC_TRACY_ZONE_WAIT(name)       ZoneScopedNC(name, 0xaaaa33)
-#define HX_GC_TRACY_TEXT(txt)             ZoneText(txt, strlen(txt))
-#define HX_GC_TRACY_PLOT(name,val)        TracyPlot(name, val)
-#define HX_GC_TRACY_THREAD(name)          tracy::SetThreadName(name)
-#define HX_GC_TRACY_MESSAGE(msg)          TracyMessageL(msg)
-#else
-#define HX_GC_TRACY_ZONE_STW(name)
-#define HX_GC_TRACY_ZONE_CONCURRENT(name)
-#define HX_GC_TRACY_ZONE_WAIT(name)
-#define HX_GC_TRACY_TEXT(txt)
-#define HX_GC_TRACY_PLOT(name,val)
-#define HX_GC_TRACY_THREAD(name)
-#define HX_GC_TRACY_MESSAGE(msg)
-#endif
 
 // #define HXCPP_GC_BIG_BLOCKS
 
@@ -269,14 +353,8 @@ enum GcMode
    gcmGenerational,
 };
 
-#ifdef HXCPP_FUTURE_GC
-// The write barriers must stay armed from the very start so a concurrent
-//  cycle can always rely on a valid remembered set
-static GcMode sGcMode = gcmGenerational;
-#else
 // Start with full gc - since all objects will be new
 static GcMode sGcMode = gcmFull;
-#endif
 
 
 
@@ -320,6 +398,21 @@ volatile int sgAllocsSinceLastSpam = 0;
 #else
    #define STAMP(t)
    #define MEM_STAMP(t)
+#endif
+
+// ---------------------------------------------------------------------------
+// HXCPP_GC_LINE_PROFILE — fine-grained per-section timing of Collect() + MarkAll().
+// Define this (-DHXCPP_GC_LINE_PROFILE) to get a one-line-per-section breakdown
+// printed after every collection.  Independent of PROFILE_COLLECT.
+// ---------------------------------------------------------------------------
+#ifdef HXCPP_GC_LINE_PROFILE
+   #define GC_LP_STAMP(t) double t = __hxcpp_time_stamp();
+   #define GC_LP_SET(t)   t = __hxcpp_time_stamp();
+   #define GC_LP_MS(a, b)  ((b - a) * 1000.0)
+#else
+   #define GC_LP_STAMP(t)
+   #define GC_LP_SET(t)
+   #define GC_LP_MS(a, b)  0.0
 #endif
 
 #if defined(HXCPP_GC_SUMMARY) || defined(HXCPP_GC_DYNAMIC_SIZE)
@@ -605,82 +698,6 @@ void CriticalGCError(const char *inMessage)
 
 enum AllocType { allocNone, allocString, allocObject, allocMarked };
 
-#ifdef HXCPP_FUTURE_GC
-
-// ---  HXCPP_FUTURE_GC state --------------------------------------------
-//
-// Mostly-concurrent major collections.  A cycle is started inside the pause
-//  of a normal generational (minor) collect:
-//    - mark ids are flipped, so every existing object becomes "white"
-//    - roots/statics/stacks are scanned and pushed (not recursed)
-//    - gFutureGcMarkActive is set: write barriers switch to shading stored
-//      values, allocation switches to allocate-black
-//  A coordinator thread then drains the mark queue with the existing worker
-//  pool while the mutators keep running, and finishes with a short
-//  stop-the-world "remark" pause (root re-scan + residual queue + sweep prep).
-//
-// Row marks made by concurrent marking go to a "shadow" slab so that the
-//  primary row marks - which allocation holes and lazy reclaim are computed
-//  from - stay stable for the whole cycle.  They are copied into place
-//  during the remark pause.
-
-namespace hx { int gFutureGcMarkActive = 0; }
-
-// Set while a cycle (concurrent mark + remark) is in flight.  Transitions
-//  only happen while the world is stopped.
-static volatile int sgFutureCycleActive = 0;
-static volatile int sgFutureCycleGen = 0;
-static volatile bool sgFutureAccelerate = false;
-static bool sgFutureCoordinatorStarted = false;
-
-static std::mutex *sgFutureLock = 0;
-static std::condition_variable *sgFutureWake = 0;
-
-static unsigned char *sgFutureShadowRows = 0;
-static int sgFutureShadowCapacity = 0;
-
-// Chunks of objects that need a consistent re-scan in the remark pause
-static volatile hx::MarkChunk *sgFutureDirtyList = 0;
-
-static int sgFutureMarkThreads = 2;
-static bool sgFutureHadFirstCollect = false;
-// Heap may grow this far between collects (live bytes + nursery budget).
-// Bigger budget = fewer minor collects; survivors, not nursery size, drive
-//  the minor pause time, so this mostly trades memory for throughput.
-static size_t sgFutureNurseryBudget = 32*1024*1024;
-static volatile size_t sgFutureGrowthCap = 0;
-static bool sgFutureVerbose = false;
-// Set during the remark pause: per-block jobs copy shadow row marks into
-//  place before counting/reclaiming
-static bool sgFutureSwapShadow = false;
-
-// Pause/cycle statistics (milliseconds)
-static volatile int sgFutureCycleCount = 0;
-static double sgFutureLastRemarkMs = 0;
-static double sgFutureMaxRemarkMs = 0;
-static double sgFutureLastCycleMs = 0;
-static double sgFutureTriggerRatio = 0.7;
-
-static inline unsigned char *FutureShadowRow(size_t inPtr)
-{
-   int blockId = *(BlockIdType *)(inPtr & IMMIX_BLOCK_BASE_MASK);
-   return sgFutureShadowRows + (size_t)blockId*IMMIX_LINES +
-            ((inPtr & IMMIX_BLOCK_OFFSET_MASK)>>IMMIX_LINE_BITS);
-}
-
-static inline unsigned char FutureAtomicOrByte(volatile unsigned char *ioPtr, unsigned char inBits)
-{
-   #ifdef _MSC_VER
-   return (unsigned char)_InterlockedOr8((volatile char *)ioPtr, (char)inBits);
-   #else
-   return __atomic_fetch_or(ioPtr, inBits, __ATOMIC_RELAXED);
-   #endif
-}
-
-static void FutureGcWaitForCycle(bool inLocked);
-
-#endif // HXCPP_FUTURE_GC
-
 struct BlockDataInfo *gBlockStack = 0;
 typedef hx::QuickVec<hx::Object *> ObjectStack;
 
@@ -951,14 +968,6 @@ struct BlockDataInfo
          for(int i=0;i<mHoles;i++)
              ZERO_MEM( (char *)mPtr+mRanges[i].start, mRanges[i].length );
          mZeroed = ZEROED_THREAD;
-
-         #ifdef HXCPP_FUTURE_GC
-         // The concurrent marker may racily follow freshly stored pointers
-         //  into this block.  Make sure it can never observe pre-zero
-         //  garbage at a new allocation site.
-         if (hx::gFutureGcMarkActive)
-            std::atomic_thread_fence(std::memory_order_release);
-         #endif
       }
       mZeroLock = 0;
       return doZero;
@@ -1018,70 +1027,53 @@ struct BlockDataInfo
    }
    #endif
 
-   #ifdef HXCPP_FUTURE_GC
-   inline void futureSwapShadowRows()
-   {
-      memcpy( mPtr->mRowMarked + IMMIX_HEADER_LINES,
-              sgFutureShadowRows + (size_t)mId*IMMIX_LINES + IMMIX_HEADER_LINES,
-              IMMIX_USEFUL_LINES );
-   }
-   #endif
-
    void countRows(BlockDataStats &outStats)
    {
-      #ifdef HXCPP_FUTURE_GC
-      if (sgFutureSwapShadow)
-         futureSwapShadowRows();
-      #endif
-
       unsigned char *rowMarked = mPtr->mRowMarked;
-      unsigned int *rowTotals = ((unsigned int *)rowMarked) + 1;
-
-      // TODO - sse/neon
-      #ifdef HXCPP_GC_BIG_BLOCKS
       unsigned int total = 0;
-      #else
-      unsigned int total = rowMarked[2] + rowMarked[3];
-      #endif
 
-      total +=
-       rowTotals[0]  + rowTotals[1]  + rowTotals[2]  + rowTotals[3]  + rowTotals[4] +
-       rowTotals[5]  + rowTotals[6]  + rowTotals[7]  + rowTotals[8]  + rowTotals[9] +
-       rowTotals[10] + rowTotals[11] + rowTotals[12] + rowTotals[13] + rowTotals[14] +
-       rowTotals[15] + rowTotals[16] + rowTotals[17] + rowTotals[18] + rowTotals[19] +
-       rowTotals[20] + rowTotals[21] + rowTotals[22] + rowTotals[23] + rowTotals[24] +
-       rowTotals[25] + rowTotals[26] + rowTotals[27] + rowTotals[28] + rowTotals[29] +
-       rowTotals[30] + rowTotals[31] + rowTotals[32] + rowTotals[33] + rowTotals[34] +
-       rowTotals[35] + rowTotals[36] + rowTotals[37] + rowTotals[38] + rowTotals[39] +
-       rowTotals[40] + rowTotals[41] + rowTotals[42] + rowTotals[43] + rowTotals[44] +
-       rowTotals[45] + rowTotals[46] + rowTotals[47] + rowTotals[48] + rowTotals[49] +
-       rowTotals[50] + rowTotals[51] + rowTotals[52] + rowTotals[53] + rowTotals[54] +
-       rowTotals[55] + rowTotals[56] + rowTotals[57] + rowTotals[58] + rowTotals[59] +
-       rowTotals[60] + rowTotals[61] + rowTotals[62];
+   #ifdef HXCPP_SSE2_SWEEP
+      // SSE2 Fast Path: Sum 16 bytes at a time using _mm_sad_epu8
+      // We skip the first 8 bytes (header flags) just like the scalar version
+      __m128i zero = _mm_setzero_si128();
+      __m128i sum_vec = _mm_setzero_si128();
+      
+      for (int r = 8; r < IMMIX_LINES; r += 16)
+      {
+         __m128i v = _mm_loadu_si128((const __m128i*)(rowMarked + r));
+         // _mm_sad_epu8 computes the sum of absolute differences against 'zero'
+         // Since rowMarked values are 0 or 1, this effectively sums the bytes.
+         sum_vec = _mm_add_epi64(sum_vec, _mm_sad_epu8(v, zero));
+      }
+      
+      // Horizontal add of the two 64-bit integers in the XMM register      
+      uint64_t tmp[2];
+      _mm_storeu_si128((__m128i*)tmp, sum_vec);
+      uint64_t low  = tmp[0];
+      uint64_t high = tmp[1];
+      total = (unsigned int)(low + high);
 
-
-      #ifdef HXCPP_GC_BIG_BLOCKS
-      rowTotals += 63;
-      total +=
-       rowTotals[0]  + rowTotals[1]  + rowTotals[2]  + rowTotals[3]  + rowTotals[4] +
-       rowTotals[5]  + rowTotals[6]  + rowTotals[7]  + rowTotals[8]  + rowTotals[9] +
-       rowTotals[10] + rowTotals[11] + rowTotals[12] + rowTotals[13] + rowTotals[14] +
-       rowTotals[15] + rowTotals[16] + rowTotals[17] + rowTotals[18] + rowTotals[19] +
-       rowTotals[20] + rowTotals[21] + rowTotals[22] + rowTotals[23] + rowTotals[24] +
-       rowTotals[25] + rowTotals[26] + rowTotals[27] + rowTotals[28] + rowTotals[29] +
-       rowTotals[30] + rowTotals[31] + rowTotals[32] + rowTotals[33] + rowTotals[34] +
-       rowTotals[35] + rowTotals[36] + rowTotals[37] + rowTotals[38] + rowTotals[39] +
-       rowTotals[40] + rowTotals[41] + rowTotals[42] + rowTotals[43] + rowTotals[44] +
-       rowTotals[45] + rowTotals[46] + rowTotals[47] + rowTotals[48] + rowTotals[49] +
-       rowTotals[50] + rowTotals[51] + rowTotals[52] + rowTotals[53] + rowTotals[54] +
-       rowTotals[55] + rowTotals[56] + rowTotals[57] + rowTotals[58] + rowTotals[59] +
-       rowTotals[60] + rowTotals[61] + rowTotals[62] + rowTotals[63];
-
-      #endif
+   #else
+      // Scalar Fallback (Original Code)
+      unsigned int *rowTotals = ((unsigned int *)rowMarked) + 1;
+      total = rowMarked[2] + rowMarked[3];
+      total += rowTotals[0] + rowTotals[1] + rowTotals[2] + rowTotals[3] + rowTotals[4] +
+               rowTotals[5] + rowTotals[6] + rowTotals[7] + rowTotals[8] + rowTotals[9] +
+               rowTotals[10] + rowTotals[11] + rowTotals[12] + rowTotals[13] + rowTotals[14] +
+               rowTotals[15] + rowTotals[16] + rowTotals[17] + rowTotals[18] + rowTotals[19] +
+               rowTotals[20] + rowTotals[21] + rowTotals[22] + rowTotals[23] + rowTotals[24] +
+               rowTotals[25] + rowTotals[26] + rowTotals[27] + rowTotals[28] + rowTotals[29] +
+               rowTotals[30] + rowTotals[31] + rowTotals[32] + rowTotals[33] + rowTotals[34] +
+               rowTotals[35] + rowTotals[36] + rowTotals[37] + rowTotals[38] + rowTotals[39] +
+               rowTotals[40] + rowTotals[41] + rowTotals[42] + rowTotals[43] + rowTotals[44] +
+               rowTotals[45] + rowTotals[46] + rowTotals[47] + rowTotals[48] + rowTotals[49] +
+               rowTotals[50] + rowTotals[51] + rowTotals[52] + rowTotals[53] + rowTotals[54] +
+               rowTotals[55] + rowTotals[56] + rowTotals[57] + rowTotals[58] + rowTotals[59] +
+               rowTotals[60] + rowTotals[61] + rowTotals[62];
+   #endif
 
       mUsedRows = (total & 0xff) + ((total>>8) & 0xff) + ((total>>16)&0xff) + ((total>>24)&0xff);
       mUsedBytes = mUsedRows<<IMMIX_LINE_BITS;
-
       mZeroLock = 0;
       mOwned = false;
       outStats.rowsInUse += mUsedRows;
@@ -1089,10 +1081,9 @@ struct BlockDataInfo
       outStats.fraggedRows += mFraggedRows;
       mFraggedRows = 0;
       mHoles = 0;
-
+      
       if (mUsedRows==IMMIX_USEFUL_LINES)
       {
-         // All rows used - write the block off
          mMoveScore = 0;
          mZeroed = ZEROED_AUTO;
          mReclaimed = true;
@@ -1102,28 +1093,13 @@ struct BlockDataInfo
          mZeroed = ZEROED_NOT;
          mReclaimed = false;
       }
-
       int left = (IMMIX_USEFUL_LINES - mUsedRows) << IMMIX_LINE_BITS;
-      #ifdef HXCPP_FUTURE_GC
-      // Optimistic upper bound - reclaim() recomputes the true hole size
-      //  before the block is used.  Without this the cached value decays
-      //  monotonically between (rare) full reclaims and the free list
-      //  starves, thrashing minor collects.
-      mMaxHoleSize = left;
-      #else
-      if (left<mMaxHoleSize)
-         mMaxHoleSize = left;
-      #endif
+      if (left<mMaxHoleSize) mMaxHoleSize = left;
    }
 
    template<bool FULL>
    void reclaim(BlockDataStats *outStats)
    {
-      #ifdef HXCPP_FUTURE_GC
-      if (sgFutureSwapShadow)
-         futureSwapShadowRows();
-      #endif
-
       HoleRange *ranges = mRanges;
       ranges[0].length = 0;
       mZeroed = ZEROED_NOT;
@@ -1134,18 +1110,9 @@ struct BlockDataInfo
       int r = IMMIX_HEADER_LINES;
       // Count unused rows ....
      
-      // start on 4-byte boundary...
-      #ifdef HXCPP_ALIGN_ALLOC
-      while(r<4 && rowMarked[r]==0)
-         r++;
-      if (!rowMarked[r])
-      #endif
-      {
-         while(r<(IMMIX_LINES-4) && *(int *)(rowMarked+r)==0 )
-            r += 4;
-         while(r<(IMMIX_LINES) && rowMarked[r]==0)
-            r++;
-      }
+      // SSE2 scan: find first non-zero row in [r, IMMIX_LINES).
+      // hx_scan_nonzero handles both SSE2 (16 bytes/iter) and scalar (4 bytes/iter).
+      r = hx_scan_nonzero(rowMarked, r, IMMIX_LINES);
 
       if (r==IMMIX_LINES)
       {
@@ -1219,18 +1186,8 @@ struct BlockDataInfo
                int start = r;
                ranges[hole].start = start;
 
-               #ifdef HXCPP_ALIGN_ALLOC
-               int alignR = (r+3) & ~3;
-               while(r<alignR && rowMarked[r]==0)
-                  r++;
-               if (!rowMarked[r])
-               #endif
-               {
-                  while(r<(IMMIX_LINES-4) && *(int *)(rowMarked+r)==0 )
-                     r += 4;
-                  while(r<(IMMIX_LINES) && rowMarked[r]==0)
-                     r++;
-               }
+               // SSE2 scan: skip run of zero rows
+               r = hx_scan_nonzero(rowMarked, r, IMMIX_LINES);
                ranges[hole].length = r-start;
                hole++;
             }
@@ -1925,93 +1882,6 @@ struct GlobalChunks
 
 GlobalChunks sGlobalChunks;
 
-#ifdef HXCPP_FUTURE_GC
-
-static void FutureGcPushDirtyChunk(MarkChunk *inChunk)
-{
-   while(true)
-   {
-      MarkChunk *head = (MarkChunk *)sgFutureDirtyList;
-      inChunk->next = head;
-      if (_hx_atomic_compare_exchange_cast_ptr(&sgFutureDirtyList, head, inChunk) == head)
-         return;
-   }
-}
-
-// Dijkstra-style barrier: called by the mutator when it stores a pointer to
-//  an unmarked, non-const allocation while concurrent marking is running.
-// Marking on the mutator side and handing the object to the markers through
-//  the chunk lists (which use acquire/release CAS) means the markers always
-//  observe fully initialised contents.
-void FutureGcShade(void *inValue, hx::StackContext *inCtx)
-{
-   unsigned int header = ((unsigned int *)inValue)[-1];
-   if (header & HX_GC_CONST_ALLOC_BIT)
-      return;
-   // A zero mark byte can only be a stale view of an object that was
-   //  allocated black during this cycle - it is already live.
-   if (!(header & 0xff000000))
-      return;
-   if ( (int)((header>>24) & FULL_MARK_BYTE_MASK) == (gByteMarkID & FULL_MARK_BYTE_MASK) )
-      return;
-
-   ((unsigned char *)inValue)[HX_ENDIAN_MARK_ID_BYTE] = (unsigned char)gByteMarkID;
-
-   int rows = header & IMMIX_ALLOC_ROW_COUNT;
-   if (rows)
-   {
-      unsigned char *rowMark = FutureShadowRow( ((size_t)inValue) - sizeof(int) );
-      for(int r=0;r<rows;r++)
-         rowMark[r] = 1;
-   }
-
-   if (header & IMMIX_ALLOC_IS_CONTAINER)
-      inCtx->pushReferrer( (hx::Object *)inValue );
-}
-
-// Queue inObj for a consistent re-scan during the remark pause.  Used when
-//  pointers may have been copied into inObj without per-value barriers.
-void FutureGcDirtyObject(hx::Object *inObj, hx::StackContext *inCtx)
-{
-   volatile unsigned char *markPtr = ((volatile unsigned char *)inObj) + HX_ENDIAN_MARK_ID_BYTE;
-   unsigned char prev = FutureAtomicOrByte(markPtr, HX_GC_REMEMBERED);
-   if (prev & (HX_GC_REMEMBERED|HX_GC_CONST_ALLOC_MARK_BIT))
-      return;
-
-   MarkChunk *chunk = inCtx->mFutureDirty;
-   if (!chunk)
-      inCtx->mFutureDirty = chunk = sGlobalChunks.alloc();
-   chunk->push(inObj);
-   if (chunk->count==MarkChunk::SIZE)
-   {
-      FutureGcPushDirtyChunk(chunk);
-      inCtx->mFutureDirty = sGlobalChunks.alloc();
-   }
-}
-
-// Allocate-black: write a fully marked header so objects created during the
-//  cycle can never be swept, and the marker never needs to inspect them.
-void FutureGcAllocBlackHeader(hx::ImmixAllocator *inAlloc, unsigned char *inBuffer, int inSize, bool inContainer)
-{
-   int start = (int)(inBuffer - inAlloc->allocBase) - (int)sizeof(int);
-   int startRow = start>>IMMIX_LINE_BITS;
-   int endRow = (start + (int)sizeof(int) + inSize + IMMIX_LINE_LEN-1)>>IMMIX_LINE_BITS;
-
-   ((unsigned int *)inBuffer)[-1] = (endRow-startRow) |
-                                    (inSize<<IMMIX_ALLOC_SIZE_SHIFT) |
-                                    (inContainer ? gMarkIDWithContainer : gMarkID);
-
-   // This block is owned by the allocating thread, no need for atomics
-   inAlloc->allocStartFlags[ startRow ] |= gImmixStartFlag[start & 127];
-
-   unsigned char *rowMark = FutureShadowRow( ((size_t)inBuffer) - sizeof(int) );
-   int rows = endRow-startRow;
-   for(int r=0;r<rows;r++)
-      rowMark[r] = 1;
-}
-
-#endif // HXCPP_FUTURE_GC
-
 class MarkContext
 {
     #ifdef HXCPP_DEBUG
@@ -2164,6 +2034,24 @@ public:
              hx::Object *obj = marking->pop();
              if (obj)
              {
+                // Prefetch the next object's header while we mark this one.
+                // __Mark reads the object's mark byte + traverses its fields,
+                // which touches the first cache line of the next object.  Issuing
+                // the prefetch now overlaps that fetch with the current __Mark call.
+                // On a pointer-chasing workload this hides ~100-200 cycles of
+                // cache-miss latency per object.
+                #if defined(HXCPP_M64) && (defined(_M_X64) || defined(__x86_64__))
+                if (marking->count > 0)
+                {
+                   hx::Object *next = marking->stack[marking->count - 1];
+                   #if defined(_MSC_VER)
+                      _mm_prefetch((const char*)next, _MM_HINT_T0);
+                   #else
+                      __builtin_prefetch(next, 0, 3);
+                   #endif
+                }
+                #endif
+
                 obj->__Mark(this);
                 #ifdef HX_MULTI_THREAD_MARKING
                 // Load balance
@@ -2267,13 +2155,6 @@ void MarkAllocUnchecked(void *inPtr,hx::MarkContext *__inCtx)
    #ifdef HXCPP_GC_NURSERY
    if (!(flags & 0xff000000))
    {
-      #ifdef HXCPP_FUTURE_GC
-      // While a concurrent cycle runs there are no live nursery allocs - this
-      //  is either dead, or a stale view of an allocate-black object
-      if (hx::gFutureGcMarkActive)
-         return;
-      #endif
-
       #ifdef HX_GC_VERIFY_GENERATIONAL
       if (sGcVerifyGenerational)
       {
@@ -2334,10 +2215,6 @@ void MarkAllocUnchecked(void *inPtr,hx::MarkContext *__inCtx)
 
       char *block = (char *)(ptr_i & IMMIX_BLOCK_BASE_MASK);
       char *rowMark = block + ((ptr_i & IMMIX_BLOCK_OFFSET_MASK)>>IMMIX_LINE_BITS);
-      #ifdef HXCPP_FUTURE_GC
-      if (hx::gFutureGcMarkActive)
-         rowMark = (char *)FutureShadowRow(ptr_i);
-      #endif
       *rowMark = 1;
       if (rows>1)
       {
@@ -2365,13 +2242,6 @@ void MarkObjectAllocUnchecked(hx::Object *inPtr,hx::MarkContext *__inCtx)
    #ifdef HXCPP_GC_NURSERY
    if (!(flags & 0xff000000))
    {
-      #ifdef HXCPP_FUTURE_GC
-      // While a concurrent cycle runs there are no live nursery objects - this
-      //  is either dead, or a stale view of an allocate-black object
-      if (hx::gFutureGcMarkActive)
-         return;
-      #endif
-
       #if defined(HX_GC_VERIFY_GENERATIONAL)
          if (sGcVerifyGenerational)
          {
@@ -2410,10 +2280,6 @@ void MarkObjectAllocUnchecked(hx::Object *inPtr,hx::MarkContext *__inCtx)
    {
       char *block = (char *)(ptr_i & IMMIX_BLOCK_BASE_MASK);
       char *rowMark = block + ((ptr_i & IMMIX_BLOCK_OFFSET_MASK)>>IMMIX_LINE_BITS);
-      #ifdef HXCPP_FUTURE_GC
-      if (hx::gFutureGcMarkActive)
-         rowMark = (char *)FutureShadowRow(ptr_i);
-      #endif
       #if HXCPP_GC_DEBUG_LEVEL>0
       if ( ((ptr_i & IMMIX_BLOCK_OFFSET_MASK)>>IMMIX_LINE_BITS) + rows > IMMIX_LINES) DebuggerTrap();
       #endif
@@ -2624,7 +2490,7 @@ void MarkStringArray(String *inPtr, int inLength, hx::MarkContext *__inCtx)
 // --- Roots -------------------------------
 
 FILE_SCOPE std::mutex* sGCRootLock = nullptr;
-typedef hx::UnorderedSet<hx::Object **> RootSet;
+typedef hx::QuickVec<hx::Object **> RootSet;
 static RootSet sgRootSet;
 
 typedef hx::UnorderedMap<void *,int> OffsetRootSet;
@@ -2633,13 +2499,13 @@ static OffsetRootSet *sgOffsetRootSet=0;
 void GCAddRoot(hx::Object **inRoot)
 {
    std::lock_guard<std::mutex> lock(*sGCRootLock);
-   sgRootSet.insert(inRoot);
+   sgRootSet.push(inRoot);
 }
 
 void GCRemoveRoot(hx::Object **inRoot)
 {
    std::lock_guard<std::mutex> lock(*sGCRootLock);
-   sgRootSet.erase(inRoot);
+   sgRootSet.qerase_val(inRoot);
 }
 
 
@@ -2706,15 +2572,284 @@ typedef hx::QuickVec<InternalFinalizer *> FinalizerList;
 
 FILE_SCOPE FinalizerList *sgFinalizers = 0;
 
-typedef hx::UnorderedMap<hx::Object *,hx::finalizer> FinalizerMap;
+typedef std::unordered_map<hx::Object *,hx::finalizer> FinalizerMap;
 FILE_SCOPE FinalizerMap sFinalizerMap;
 
 typedef void (*HaxeFinalizer)(Dynamic);
-typedef hx::UnorderedMap<hx::Object *,HaxeFinalizer> HaxeFinalizerMap;
+typedef std::unordered_map<hx::Object *,HaxeFinalizer> HaxeFinalizerMap;
 FILE_SCOPE HaxeFinalizerMap sHaxeFinalizerMap;
 
+// --- Deferred finalizer queue ---
+// When HXCPP_DEFER_HAXE_FINALIZERS is defined, dead objects with Haxe finalizers
+// are NOT called during the GC pause.  Instead they are queued here, temporarily
+// resurrected (marked alive) so they survive the sweep, and drained automatically
+// during normal allocation calls — no Haxe-side changes required.
+// This turns a 35ms GC spike into ~0.1ms amortized across subsequent allocations.
+//
+// The struct, data, and accessors are ALL defined at the top of this file.
+// Nothing to do here — the code below just uses GetDeferredFinalizers().
+
+template <class Key, class T, class Hash = std::hash<Key>, class KeyEqual = std::equal_to<Key>>
+class CustomUnorderedMap {
+public:
+    using key_type = Key;
+    using mapped_type = T;
+    using value_type = std::pair<const Key, T>;
+    using size_type = size_t;
+    using difference_type = ptrdiff_t;
+    using hasher = Hash;
+    using key_equal = KeyEqual;
+    using reference = value_type&;
+    using const_reference = const value_type&;
+    using pointer = value_type*;
+    using const_pointer = const value_type*;
+
+private:
+    struct Slot {
+        Key key;
+        T value;
+    };
+    std::vector<Slot> mSlots;
+    std::vector<uint8_t> mStates; // 0: Empty, 1: Occupied, 2: Deleted (Tombstone)
+    size_t mSize;
+    size_t mDeletedCount;
+    size_t mMask;
+    Hash mHash;
+    KeyEqual mEqual;
+
+    static constexpr uint8_t EMPTY = 0;
+    static constexpr uint8_t OCCUPIED = 1;
+    static constexpr uint8_t DELETED = 2;
+
+    void rehash_to(size_t new_cap) {
+        std::vector<Slot> old_slots = std::move(mSlots);
+        std::vector<uint8_t> old_states = std::move(mStates);
+        
+        mSlots.assign(new_cap, Slot{});
+        mStates.assign(new_cap, EMPTY);
+        mMask = new_cap - 1;
+        mDeletedCount = 0;
+        
+        for (size_t i = 0; i < old_slots.size(); ++i) {
+            if (old_states[i] == OCCUPIED) {
+                size_t idx = mHash(old_slots[i].key) & mMask;
+                while (mStates[idx] != EMPTY) {
+                    idx = (idx + 1) & mMask;
+                }
+                mSlots[idx].key = std::move(old_slots[i].key);
+                mSlots[idx].value = std::move(old_slots[i].value);
+                mStates[idx] = OCCUPIED;
+            }
+        }
+    }
+
+    void check_rehash() {
+        size_t cap = mSlots.size();
+        // Rehash if load factor > 0.75 or too many tombstones
+        if (cap == 0 || (mSize + mDeletedCount) * 4 > cap * 3) {
+            size_t new_cap = cap == 0 ? 8 : cap * 2;
+            rehash_to(new_cap);
+        }
+    }
+
+public:
+    // --- Iterator ---
+    class Iterator {
+    public:
+        using iterator_category = std::forward_iterator_tag;
+        using value_type = std::pair<const Key, T>;
+        using difference_type = std::ptrdiff_t;
+        using pointer = value_type*;
+        using reference = value_type&;
+
+        CustomUnorderedMap* mMap;
+        size_t mIdx;
+
+        Iterator(CustomUnorderedMap* m, size_t idx) : mMap(m), mIdx(idx) { advance(); }
+
+        void advance() {
+            while (mIdx < mMap->mSlots.size() && mMap->mStates[mIdx] != OCCUPIED) ++mIdx;
+        }
+
+        reference operator*() const {
+            // Safe cast: memory layout of std::pair<Key, T> and std::pair<const Key, T> is identical
+            return *reinterpret_cast<pointer>(&mMap->mSlots[mIdx]);
+        }
+
+        pointer operator->() const {
+            return reinterpret_cast<pointer>(&mMap->mSlots[mIdx]);
+        }
+
+        Iterator& operator++() { ++mIdx; advance(); return *this; }
+        Iterator operator++(int) { Iterator tmp = *this; ++(*this); return tmp; }
+        bool operator==(const Iterator& other) const { return mIdx == other.mIdx; }
+        bool operator!=(const Iterator& other) const { return mIdx != other.mIdx; }
+    };
+
+    using iterator = Iterator;
+    using const_iterator = Iterator;
+
+    // --- Constructors ---
+    CustomUnorderedMap() : mSize(0), mDeletedCount(0), mMask(0) {}
+    ~CustomUnorderedMap() = default;
+
+    // --- Capacity ---
+    bool empty() const { return mSize == 0; }
+    size_t size() const { return mSize; }
+    size_t max_size() const { return mSlots.max_size(); }
+
+    // --- Modifiers ---
+    void clear() {
+        mSlots.clear(); mStates.clear();
+        mSize = 0; mDeletedCount = 0; mMask = 0;
+    }
+
+    void reserve(size_t count) {
+        if (count == 0) return;
+        size_t cap = 8;
+        while (cap < count * 2) cap <<= 1; // Keep load factor < 0.5
+        if (cap > mSlots.size()) rehash_to(cap);
+    }
+
+    std::pair<iterator, bool> insert(const value_type& v) { return emplace(v.first, v.second); }
+    std::pair<iterator, bool> insert(value_type&& v) { return emplace(std::move(v.first), std::move(v.second)); }
+
+    template <class... Args>
+    std::pair<iterator, bool> emplace(Args&&... args) {
+        check_rehash();
+        std::pair<Key, T> temp(std::forward<Args>(args)...);
+        
+        size_t idx = mHash(temp.first) & mMask;
+        size_t first_deleted = mSlots.size();
+        
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, temp.first))
+                return {iterator(this, idx), false};
+            if (mStates[idx] == DELETED && first_deleted == mSlots.size())
+                first_deleted = idx;
+            idx = (idx + 1) & mMask;
+        }
+        
+        size_t insert_idx = (first_deleted != mSlots.size()) ? first_deleted : idx;
+        mSlots[insert_idx].key = std::move(temp.first);
+        mSlots[insert_idx].value = std::move(temp.second);
+        mStates[insert_idx] = OCCUPIED;
+        mSize++;
+        return {iterator(this, insert_idx), true};
+    }
+
+    size_t erase(const key_type& k) {
+        if (mSlots.empty()) return 0;
+        size_t idx = mHash(k) & mMask;
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, k)) {
+                mStates[idx] = DELETED;
+                mSlots[idx].key.~Key();
+                mSlots[idx].value.~T();
+                mSize--; mDeletedCount++;
+                return 1;
+            }
+            idx = (idx + 1) & mMask;
+        }
+        return 0;
+    }
+
+    iterator erase(iterator it) {
+        if (it.mIdx < mSlots.size() && mStates[it.mIdx] == OCCUPIED) {
+            mStates[it.mIdx] = DELETED;
+            mSlots[it.mIdx].key.~Key();
+            mSlots[it.mIdx].value.~T();
+            mSize--; mDeletedCount++;
+            ++it;
+            return it;
+        }
+        return end();
+    }
+
+    void swap(CustomUnorderedMap& other) {
+        mSlots.swap(other.mSlots); mStates.swap(other.mStates);
+        std::swap(mSize, other.mSize); std::swap(mDeletedCount, other.mDeletedCount);
+        std::swap(mMask, other.mMask); std::swap(mHash, other.mHash); std::swap(mEqual, other.mEqual);
+    }
+
+    // --- Lookup ---
+    iterator find(const key_type& k) {
+        if (mSlots.empty()) return end();
+        size_t idx = mHash(k) & mMask;
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, k))
+                return iterator(this, idx);
+            idx = (idx + 1) & mMask;
+        }
+        return end();
+    }
+
+    const_iterator find(const key_type& k) const { return const_cast<CustomUnorderedMap*>(this)->find(k); }
+    size_t count(const key_type& k) const { return find(k) != end() ? 1 : 0; }
+
+    T& operator[](const key_type& k) {
+        check_rehash();
+        size_t idx = mHash(k) & mMask;
+        size_t first_deleted = mSlots.size();
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, k)) return mSlots[idx].value;
+            if (mStates[idx] == DELETED && first_deleted == mSlots.size()) first_deleted = idx;
+            idx = (idx + 1) & mMask;
+        }
+        size_t insert_idx = (first_deleted != mSlots.size()) ? first_deleted : idx;
+        mSlots[insert_idx].key = k;
+        mSlots[insert_idx].value = T();
+        mStates[insert_idx] = OCCUPIED;
+        mSize++;
+        return mSlots[insert_idx].value;
+    }
+
+    T& operator[](key_type&& k) {
+        check_rehash();
+        size_t idx = mHash(k) & mMask;
+        size_t first_deleted = mSlots.size();
+        while (mStates[idx] != EMPTY) {
+            if (mStates[idx] == OCCUPIED && mEqual(mSlots[idx].key, k)) return mSlots[idx].value;
+            if (mStates[idx] == DELETED && first_deleted == mSlots.size()) first_deleted = idx;
+            idx = (idx + 1) & mMask;
+        }
+        size_t insert_idx = (first_deleted != mSlots.size()) ? first_deleted : idx;
+        mSlots[insert_idx].key = std::move(k);
+        mSlots[insert_idx].value = T();
+        mStates[insert_idx] = OCCUPIED;
+        mSize++;
+        return mSlots[insert_idx].value;
+    }
+
+    T& at(const key_type& k) {
+        iterator it = find(k);
+        if (it == end()) throw std::out_of_range("CustomUnorderedMap::at");
+        return it->second;
+    }
+
+    const T& at(const key_type& k) const {
+        const_iterator it = find(k);
+        if (it == end()) throw std::out_of_range("CustomUnorderedMap::at");
+        return it->second;
+    }
+
+    // --- Iterators ---
+    iterator begin() { return iterator(this, 0); }
+    const_iterator begin() const { return const_cast<CustomUnorderedMap*>(this)->begin(); }
+    iterator end() { return iterator(this, mSlots.size()); }
+    const_iterator end() const { return const_cast<CustomUnorderedMap*>(this)->end(); }
+
+    // --- Bucket Interface (Stubs for API compatibility) ---
+    size_t bucket_count() const { return mSlots.size(); }
+    size_t max_bucket_count() const { return mSlots.max_size(); }
+    float load_factor() const { return mSlots.empty() ? 0 : (float)mSize / mSlots.size(); }
+    float max_load_factor() const { return 0.75f; }
+    void max_load_factor(float) {} 
+    void rehash(size_t count) { reserve(count); }
+};
+
 hx::QuickVec<int> sFreeObjectIds;
-typedef hx::UnorderedMap<hx::Object *,int> ObjectIdMap;
+typedef CustomUnorderedMap<hx::Object *,int> ObjectIdMap;
 typedef hx::QuickVec<hx::Object *> IdObjectMap;
 FILE_SCOPE ObjectIdMap sObjectIdMap;
 FILE_SCOPE IdObjectMap sIdObjectMap;
@@ -2754,6 +2889,8 @@ void InternalFinalizer::Detach()
 
 void FindZombies(MarkContext &inContext)
 {
+   GC_LP_SET(gFZ_t0);
+   gFZ_nZombies = 0;
    for(MakeZombieSet::iterator i=sMakeZombieSet.begin(); i!=sMakeZombieSet.end(); )
    {
       hx::Object *obj = *i;
@@ -2765,6 +2902,7 @@ void FindZombies(MarkContext &inContext)
       {
          sZombieList.push(obj);
          sMakeZombieSet.erase(i);
+         gFZ_nZombies++;
 
          // Mark now to prevent secondary zombies...
          inContext.init();
@@ -2774,6 +2912,7 @@ void FindZombies(MarkContext &inContext)
 
       i = next;
    }
+   GC_LP_SET(gFZ_t1);
 }
 
 bool IsWeakRefValid(const HX_CHAR *inPtr)
@@ -2856,7 +2995,6 @@ struct Finalizable
 typedef hx::QuickVec< Finalizable > FinalizableList;
 FILE_SCOPE FinalizableList sFinalizableList;
 
-
 static double tFinalizers;
 static int finalizerCount;
 static int localCount;
@@ -2865,11 +3003,14 @@ static int localAllocs;
 static int rootObjects;
 static int rootAllocs;
 
-void RunFinalizers()
+void RunFinalizers(hx::MarkContext *inCtx = 0)
 {
    finalizerCount = 0;
+   GC_LP_SET(gRF_t0);
 
    FinalizerList &list = *sgFinalizers;
+   gRF_nFinalizers = list.size();
+   gRF_killedFinalizers = 0;
    int idx = 0;
    while(idx<list.size())
    {
@@ -2878,6 +3019,7 @@ void RunFinalizers()
       {
          list.qerase(idx);
          delete f;
+         gRF_killedFinalizers++;
       }
       else if (((unsigned char *)(f->mObject))[HX_ENDIAN_MARK_ID_BYTE] != gByteMarkID)
       {
@@ -2888,6 +3030,7 @@ void RunFinalizers()
          }
          list.qerase(idx);
          delete f;
+         gRF_killedFinalizers++;
       }
       else
       {
@@ -2895,6 +3038,10 @@ void RunFinalizers()
       }
    }
 
+   GC_LP_SET(gRF_t1);
+
+   gRF_nFinalizable = sFinalizableList.size();
+   gRF_killedFinalizable = 0;
    idx = 0;
    while(idx<sFinalizableList.size())
    {
@@ -2905,65 +3052,153 @@ void RunFinalizers()
          finalizerCount++;
          f.run();
          sFinalizableList.qerase(idx);
+         gRF_killedFinalizable++;
       }
       else
          idx++;
    }
 
-   for(FinalizerMap::iterator i=sFinalizerMap.begin(); i!=sFinalizerMap.end(); )
+   GC_LP_SET(gRF_t2);
+
+   gRF_nFinalizerMap = (int)sFinalizerMap.size();
+   gRF_killedFinalizerMap = 0;
+   // Same survivor-map optimization as sHaxeFinalizerMap below.
    {
-      hx::Object *obj = i->first;
-      FinalizerMap::iterator next = i;
-      ++next;
-
-      unsigned char mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
-      if ( mark!=gByteMarkID )
+      FinalizerMap survivors;
+      survivors.reserve(sFinalizerMap.size());
+      for(FinalizerMap::iterator i=sFinalizerMap.begin(); i!=sFinalizerMap.end(); ++i)
       {
-         finalizerCount++;
-         (*i->second)(obj);
-         sFinalizerMap.erase(i);
+         hx::Object *obj = i->first;
+         unsigned char mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
+         if ( mark!=gByteMarkID )
+         {
+            finalizerCount++;
+            (*i->second)(obj);
+            gRF_killedFinalizerMap++;
+         }
+         else
+         {
+            survivors.insert(*i);
+         }
       }
-
-      i = next;
+      sFinalizerMap.swap(survivors);
    }
 
+   GC_LP_SET(gRF_t3);
 
-   for(HaxeFinalizerMap::iterator i=sHaxeFinalizerMap.begin(); i!=sHaxeFinalizerMap.end(); )
+   gRF_nHaxeFinalizerMap = (int)sHaxeFinalizerMap.size();
+   gRF_killedHaxeFinalizerMap = 0;
+
+   #ifdef HXCPP_DEFER_HAXE_FINALIZERS
+   // DEFERRED MODE: don't call finalizers during the pause.  Instead:
+   //   1. Remove dead entries from the map
+   //   2. Push (obj, func) to sDeferredFinalizers
+   //   3. Resurrect the object (mark it + its children) so it survives sweep
+   //
+   // BATCHED RESURRECTION: instead of calling init()+MarkObjectAlloc()+processMarkStack()
+   // per object (4696 mark-stack flushes), we do ONE init, push all objects onto
+   // the mark stack, then ONE processMarkStack at the end.  This turns 4696 flushes
+   // into 1, cutting resurrection cost by ~5-10x.
    {
-      hx::Object *obj = i->first;
-      HaxeFinalizerMap::iterator next = i;
-      ++next;
+      HaxeFinalizerMap survivors;
+      survivors.reserve(sHaxeFinalizerMap.size());
 
-      unsigned char mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
-      if ( mark!=gByteMarkID )
+      if (inCtx)
+         inCtx->init();   // single init for the whole batch
+
+      for(HaxeFinalizerMap::iterator i=sHaxeFinalizerMap.begin(); i!=sHaxeFinalizerMap.end(); ++i)
       {
-         finalizerCount++;
-         (*i->second)(obj);
-         sHaxeFinalizerMap.erase(i);
+         hx::Object *obj = i->first;
+         unsigned char mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
+         if ( mark!=gByteMarkID )
+         {
+            // Queue for deferred execution
+            GetDeferredFinalizers().push(DeferredFinalizerEntry{obj, i->second});
+            finalizerCount++;
+            gRF_killedHaxeFinalizerMap++;
+
+            // Resurrect: just push onto the mark stack.  We'll flush once
+            // after the loop.  MarkObjectAlloc sets the mark byte + row marks
+            // and pushes the object's children onto the mark stack — but the
+            // actual child traversal happens in processMarkStack below.
+            if (inCtx)
+               hx::MarkObjectAlloc(obj, inCtx);
+            else
+               ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE] = gByteMarkID;
+         }
+         else
+         {
+            survivors.insert(*i);
+         }
       }
 
-      i = next;
+      // ONE mark-stack flush for the entire batch — traverses all children
+      // of all resurrected objects in a single pass.
+      if (inCtx)
+         inCtx->processMarkStack();
+
+      sHaxeFinalizerMap.swap(survivors);
+      if (GetDeferredFinalizers().size() > GetDeferredHighWater())
+         GetDeferredHighWater() = GetDeferredFinalizers().size();
    }
+   #else
+   // INLINE MODE (original behavior): call finalizers immediately during the pause.
+   // Uses survivor-map to avoid erase-during-iterate on unordered_map.
+   {
+      HaxeFinalizerMap survivors;
+      survivors.reserve(sHaxeFinalizerMap.size());
+      for(HaxeFinalizerMap::iterator i=sHaxeFinalizerMap.begin(); i!=sHaxeFinalizerMap.end(); ++i)
+      {
+         hx::Object *obj = i->first;
+         unsigned char mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
+         if ( mark!=gByteMarkID )
+         {
+            finalizerCount++;
+            (*i->second)(obj);
+            gRF_killedHaxeFinalizerMap++;
+         }
+         else
+         {
+            survivors.insert(*i);
+         }
+      }
+      sHaxeFinalizerMap.swap(survivors);
+   }
+   #endif
+
+   GC_LP_SET(gRF_t4);
 
    MEM_STAMP(hx::tFinalizers);
 
-   for(ObjectIdMap::iterator i=sObjectIdMap.begin(); i!=sObjectIdMap.end(); )
+   gRF_nObjectIdMap = (int)sObjectIdMap.size();
+   gRF_killedObjectIdMap = 0;
+   // Same survivor-map optimization.  sObjectIdMap isn't huge in your profile
+   // (n=392) but the pattern is identical and the fix is cheap.
    {
-      ObjectIdMap::iterator next = i;
-      next++;
-
-      hx::Object *o = i->first;
-      unsigned char mark = ((unsigned char *)o)[HX_ENDIAN_MARK_ID_BYTE];
-      if ( mark!=gByteMarkID && !(((unsigned int *)o)[-1] & HX_GC_CONST_ALLOC_BIT))
+      ObjectIdMap survivors;
+      survivors.reserve(sObjectIdMap.size());
+      for(ObjectIdMap::iterator i=sObjectIdMap.begin(); i!=sObjectIdMap.end(); ++i)
       {
-         sFreeObjectIds.push(i->second);
-         sIdObjectMap[i->second] = 0;
-         sObjectIdMap.erase(i);
+         hx::Object *o = i->first;
+         unsigned char mark = ((unsigned char *)o)[HX_ENDIAN_MARK_ID_BYTE];
+         if ( mark!=gByteMarkID && !(((unsigned int *)o)[-1] & HX_GC_CONST_ALLOC_BIT))
+         {
+            sFreeObjectIds.push(i->second);
+            sIdObjectMap[i->second] = 0;
+            gRF_killedObjectIdMap++;
+         }
+         else
+         {
+            survivors.insert(*i);
+         }
       }
-
-      i = next;
+      sObjectIdMap.swap(survivors);
    }
 
+   GC_LP_SET(gRF_t5);
+
+   gRF_nWeakHash = sWeakHashList.size();
+   gRF_killedWeakHash = 0;
    for(int i=0;i<sWeakHashList.size();    )
    {
       HashRoot *ref = sWeakHashList[i];
@@ -2972,6 +3207,7 @@ void RunFinalizers()
       if ( mark!=gByteMarkID )
       {
          sWeakHashList.qerase(i);
+         gRF_killedWeakHash++;
          // no i++ ...
       }
       else
@@ -2981,8 +3217,10 @@ void RunFinalizers()
       }
    }
 
+   GC_LP_SET(gRF_t6);
 
-
+   gRF_nWeakRefs = sWeakRefs.size();
+   gRF_killedWeakRefs = 0;
    for(int i=0;i<sWeakRefs.size();    )
    {
       WeakRef *ref = sWeakRefs[i];
@@ -2991,6 +3229,7 @@ void RunFinalizers()
       if ( mark!=gByteMarkID )
       {
          sWeakRefs.qerase(i);
+         gRF_killedWeakRefs++;
          // no i++ ...
       }
       else
@@ -3018,11 +3257,14 @@ void RunFinalizers()
          {
             ref->mRef.mPtr = 0;
             sWeakRefs.qerase(i);
+            gRF_killedWeakRefs++;
          }
          else
             i++;
       }
    }
+
+   GC_LP_SET(gRF_t7);
 }
 
 // Callback finalizer on non-abstract type;
@@ -3362,6 +3604,147 @@ static int sMaxZeroQueueSize = 32;
 
 #define BLOCK_OFSIZE_COUNT 12
 
+// Custom open-addressing hash map backed by std::vector for maximum cache locality.
+// Replaces hx::UnorderedMap for mLargeIndex to avoid pointer-chasing overhead.
+struct LargeIndexMap {
+    std::vector<unsigned int*> keys;
+    std::vector<int> values;
+    size_t mask;
+    size_t count; // Tracks the actual number of elements
+
+    LargeIndexMap() : mask(0), count(0) {}
+
+    void reserve(size_t n) {
+        size_t cap = 16;
+        while (cap < n * 2) cap <<= 1;
+        keys.assign(cap, nullptr);
+        values.assign(cap, -1);
+        mask = cap - 1;
+        count = 0;
+    }
+
+    // Returns the index, or -1 if not found
+    int find(unsigned int* key) const {
+        if (mask == 0) return -1;
+        size_t idx = (size_t(key) >> 3) & mask;
+        while (keys[idx] != nullptr) {
+            if (keys[idx] == key) return values[idx];
+            idx = (idx + 1) & mask;
+        }
+        return -1;
+    }
+
+    void insert(unsigned int* key, int value) {
+        if (mask == 0) {
+            reserve(16);
+        } 
+        else if (count * 2 > mask) { // FIXED: Use 'count' instead of 'keys.size()'
+            // Rehash if load factor > 0.5
+            size_t newCap = (mask + 1) * 2;
+            std::vector<unsigned int*> newKeys(newCap, nullptr);
+            std::vector<int> newValues(newCap, -1);
+            size_t newMask = newCap - 1;
+            for (size_t i = 0; i <= mask; ++i) {
+                if (keys[i] != nullptr) {
+                    size_t idx = (size_t(keys[i]) >> 3) & newMask;
+                    while (newKeys[idx] != nullptr) idx = (idx + 1) & newMask;
+                    newKeys[idx] = keys[i];
+                    newValues[idx] = values[i];
+                }
+            }
+            keys = std::move(newKeys);
+            values = std::move(newValues);
+            mask = newMask;
+        }
+        
+        size_t idx = (size_t(key) >> 3) & mask;
+        while (keys[idx] != nullptr) {
+            if (keys[idx] == key) {
+                values[idx] = value; // Update existing key
+                return;
+            }
+            idx = (idx + 1) & mask;
+        }
+        keys[idx] = key;
+        values[idx] = value;
+        count++; // FIXED: Increment actual element count
+    }
+
+    void erase(unsigned int* key) {
+        if (mask == 0) return;
+        size_t idx = (size_t(key) >> 3) & mask;
+        while (keys[idx] != nullptr) {
+            if (keys[idx] == key) {
+                keys[idx] = nullptr;
+                values[idx] = -1;
+                count--; // FIXED: Decrement actual element count
+                
+                // Rehash the cluster to fix tombstones
+                idx = (idx + 1) & mask;
+                while (keys[idx] != nullptr) {
+                    unsigned int* k = keys[idx];
+                    int v = values[idx];
+                    keys[idx] = nullptr;
+                    values[idx] = -1;
+                    size_t newIdx = (size_t(k) >> 3) & mask;
+                    while (keys[newIdx] != nullptr) newIdx = (newIdx + 1) & mask;
+                    keys[newIdx] = k;
+                    values[newIdx] = v;
+                    idx = (idx + 1) & mask;
+                }
+                return;
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+    
+    void clear() {
+        if (mask > 0) {
+            std::fill(keys.begin(), keys.end(), nullptr);
+            std::fill(values.begin(), values.end(), -1);
+            count = 0;
+        }
+    }
+};
+
+// Custom contiguous map for the large object recycle pool.
+// Replaces hx::UnorderedMap<int, std::vector<unsigned int*>>.
+struct LargeRecyclePool {
+    std::vector<std::pair<int, std::vector<unsigned int*>>> buckets;
+
+    using iterator = std::vector<std::pair<int, std::vector<unsigned int*>>>::iterator;
+    using const_iterator = std::vector<std::pair<int, std::vector<unsigned int*>>>::const_iterator;
+
+    iterator find(int size) {
+        for (auto it = buckets.begin(); it != buckets.end(); ++it) {
+            if (it->first == size) return it;
+        }
+        return buckets.end();
+    }
+
+    std::vector<unsigned int*>& operator[](int size) {
+        for (auto& b : buckets) {
+            if (b.first == size) return b.second;
+        }
+        buckets.push_back({size, {}});
+        return buckets.back().second;
+    }
+
+    void erase(iterator it) {
+        buckets.erase(it);
+    }
+
+    void clear() {
+        buckets.clear();
+    }
+    
+    // Required for range-based for loops (for (auto &kv : mLargeRecycleBySize))
+    iterator begin() { return buckets.begin(); }
+    iterator end() { return buckets.end(); }
+    const_iterator begin() const { return buckets.begin(); }
+    const_iterator end() const { return buckets.end(); }
+};
+
 
 class GlobalAllocator
 {
@@ -3384,6 +3767,9 @@ public:
          mLocalPool[p] = 0;
 
       createFreeList();
+
+      mHeapMin = (char*)~(size_t)0;
+      mHeapMax = 0;
    }
    void AddLocal(LocalAllocator *inAlloc)
    {
@@ -3439,6 +3825,27 @@ public:
       }
    }
 
+   // O(1) removal of a known-live large blob from mLargeList + mLargeIndex.
+   // MUST be called with mLargeListLock held.
+   void RemoveLargeLocked(unsigned int *blob)
+   {
+      int idx = mLargeIndex.find(blob);
+      if (idx == -1)
+      {
+         CriticalGCError("Large alloc removed without being added");
+         return;
+      }
+      mLargeIndex.erase(blob);
+      int last = mLargeList.size() - 1;
+      if (idx != last)
+      {
+         unsigned int *moved = mLargeList[last];
+         mLargeList[idx] = moved;
+         mLargeIndex.insert(moved, idx);
+      }
+      mLargeList.setSize(last);
+   }
+
    void FreeLarge(void *inLarge)
    {
 #ifdef HXCPP_TELEMETRY
@@ -3446,26 +3853,30 @@ public:
 #endif
 
       ((unsigned char *)inLarge)[HX_ENDIAN_MARK_ID_BYTE] = 0;
-      // AllocLarge will not lock this list unless it decides there is a suitable
-      //  value, so we can't doa realloc without potentially crashing it.
-      if (largeObjectRecycle.hasExtraCapacity(1))
+
+      unsigned int *blob = ((unsigned int *)inLarge) - 2;
+      unsigned int size = *blob;
+
+      // Fast path: skip the lock entirely if the recycle pool is at cap.
+      // The blob stays in mLargeList with mark byte cleared; next sweep reclaims it.
+      if (mLargeRecycleBytes + size >= mLargeAllocForceRefresh)
+         return;
+
+      mLargeListLock.lock();
+
+      // Re-check under the lock — another thread may have filled the pool.
+      if (mLargeRecycleBytes + size >= mLargeAllocForceRefresh)
       {
-         unsigned int *blob = ((unsigned int *)inLarge) - 2;
-         unsigned int size = *blob;
-         mLargeListLock.lock();
-         mLargeAllocated -= size;
-         // Could somehow keep it in the list, but mark as recycled?
-         mLargeList.qerase_val(blob);
-         // We could maybe free anyhow?
-         if (!largeObjectRecycle.hasExtraCapacity(1))
-         {
-            mLargeListLock.unlock();
-            HxFree(blob);
-            return;
-         }
-         largeObjectRecycle.push(blob);
          mLargeListLock.unlock();
+         return;
       }
+
+      mLargeAllocated -= size;
+      RemoveLargeLocked(blob);                     // O(1) instead of O(n) qerase_val
+      mLargeRecycleBySize[size].push_back(blob);
+      mLargeRecycleBytes += size;
+
+      mLargeListLock.unlock();
    }
 
    void *AllocLarge(int inSize, bool inClear)
@@ -3479,11 +3890,6 @@ public:
       {
          #ifdef SHOW_MEM_EVENTS
          //GCLOG("Large alloc causing collection");
-         #endif
-         #ifdef HXCPP_FUTURE_GC
-         if (sgFutureCycleActive)
-            sgFutureAccelerate = true;   // keep allocating; remark sweeps large objects
-         else
          #endif
          CollectFromThisThread(false,false);
       }
@@ -3502,31 +3908,35 @@ public:
       bool isLocked = false;
 
 
-      if (largeObjectRecycle.size())
+      // O(1) size-matched recycle lookup — was O(n) linear scan.
       {
-         for(int i=0;i<largeObjectRecycle.size();i++)
+         auto it = mLargeRecycleBySize.find(inSize);
+         if (it != mLargeRecycleBySize.end() && !it->second.empty())
          {
-            if ( largeObjectRecycle[i][0] == inSize )
+            if (do_lock && !isLocked)
             {
-               if (do_lock && !isLocked)
-               {
-                  mLargeListLock.lock();
-                  isLocked = true;
-                  if (  i>=largeObjectRecycle.size() || largeObjectRecycle[i][0] != inSize )
-                     continue;
-               }
+               mLargeListLock.lock();
+               isLocked = true;
+               it = mLargeRecycleBySize.find(inSize);  // re-find under lock
+            }
 
-               result = largeObjectRecycle[i];
-               largeObjectRecycle.qerase(i);
-               // You can use this to test race condition
-               //Sleep(1);
-               break;
+            if (it != mLargeRecycleBySize.end() && !it->second.empty())
+            {
+               result = it->second.back();
+               it->second.pop_back();
+               mLargeRecycleBytes -= inSize;
+               if (it->second.empty())
+                  mLargeRecycleBySize.erase(it);
             }
          }
       }
 
+      size_t largeAllocSize = inSize + sizeof(int)*2;
       if (!result)
-         result = (unsigned int *)HxAlloc(inSize + sizeof(int)*2);
+      result = (unsigned int *)HxAlloc(largeAllocSize);
+
+      if ((char*)result < mHeapMin) mHeapMin = (char*)result;
+      if ((char*)result + largeAllocSize > mHeapMax) mHeapMax = (char*)result + largeAllocSize;
 
       if (!result)
       {
@@ -3555,12 +3965,7 @@ public:
 
       result[0] = inSize;
       #ifdef HXCPP_GC_NURSERY
-         #ifdef HXCPP_FUTURE_GC
-         // Allocate black while concurrent marking runs
-         result[1] = hx::gFutureGcMarkActive ? (unsigned int)hx::gMarkID : 0;
-         #else
-         result[1] = 0;
-         #endif
+      result[1] = 0;
       #else
       result[1] = hx::gMarkID;
       #endif
@@ -3568,6 +3973,8 @@ public:
       if (do_lock && !isLocked)
          mLargeListLock.lock();
 
+      // Maintain the O(1) index alongside the push.
+      mLargeIndex.insert(result, mLargeList.size());
       mLargeList.push(result);
       mLargeAllocated += inSize;
 
@@ -3593,11 +4000,6 @@ public:
          if (inDelta>0 && (inDelta+mLargeAllocated > mLargeAllocForceRefresh) && sgInternalEnable)
          {
             //GCLOG("onMemoryChange alloc causing collection");
-            #ifdef HXCPP_FUTURE_GC
-            if (sgFutureCycleActive)
-               sgFutureAccelerate = true;
-            else
-            #endif
             CollectFromThisThread(false,false);
          }
 
@@ -3717,18 +4119,6 @@ public:
    {
       enum { newBlockCount = 1<<(IMMIX_BLOCK_GROUP_BITS) };
 
-      #ifdef HXCPP_FUTURE_GC
-      // The shadow row slab is sized at cycle start - do not allow block ids
-      //  beyond its capacity while concurrent marking is running
-      if (sgFutureCycleActive && gBlockInfo &&
-            gBlockInfo->size() + newBlockCount > sgFutureShadowCapacity)
-      {
-         sgFutureAccelerate = true;
-         outForceCompact = false;
-         return false;
-      }
-      #endif
-
       #ifdef HXCPP_GC_MOVING
       if (!inJustBorrowing)
       {
@@ -3786,7 +4176,8 @@ public:
          return false;
       }
 
-      char *chunk = (char *)HxAllocGCBlock( 1<<(IMMIX_BLOCK_GROUP_BITS + IMMIX_BLOCK_BITS) );
+      size_t blockAllocSize = 1<<(IMMIX_BLOCK_GROUP_BITS + IMMIX_BLOCK_BITS);
+      char *chunk = (char *)HxAllocGCBlock( blockAllocSize );
       if (!chunk)
       {
          //DebuggerTrap();
@@ -3818,6 +4209,9 @@ public:
       for(int i=0;i<BLOCK_OFSIZE_COUNT;i++)
          mNextFreeBlockOfSize[i] = newSize;
 
+      if ((char*)chunk < mHeapMin) mHeapMin = (char*)chunk;
+      if ((char*)chunk + blockAllocSize > mHeapMax) mHeapMax = (char*)chunk + blockAllocSize;
+
       #ifdef HXCPP_GC_VERIFY
       VerifyBlockOrder();
       #endif
@@ -3839,13 +4233,7 @@ public:
 
    bool allowMoreBlocks()
    {
-      #ifdef HXCPP_FUTURE_GC
-      // Allow the heap to grow during warmup (like the classic gcmFull start)
-      //  and while a concurrent cycle is running, so the mutators are never
-      //  forced to wait for the marker
-      return sGcMode==gcmFull || sgFutureCycleActive || !sgFutureHadFirstCollect ||
-               GetWorkingMemory() < sgFutureGrowthCap;
-      #elif defined(HXCPP_GC_GENERATIONAL)
+      #ifdef HXCPP_GC_GENERATIONAL
       return sGcMode==gcmFull;
       #else
       return true;
@@ -3890,17 +4278,7 @@ public:
          #endif
 
          bool forceCompact = false;
-         bool growthOk = !sgInternalEnable || GetWorkingMemory()<sWorkingMemorySize;
-         #ifdef HXCPP_FUTURE_GC
-         if (!growthOk && sgFutureCycleActive)
-         {
-            // Borrow memory rather than stalling this thread until the
-            //  concurrent cycle completes - but ask it to hurry up
-            sgFutureAccelerate = true;
-            growthOk = true;
-         }
-         #endif
-         if (!result && allowMoreBlocks() && growthOk)
+         if (!result && allowMoreBlocks() && (!sgInternalEnable || GetWorkingMemory()<sWorkingMemorySize))
          {
             if (AllocMoreBlocks(forceCompact,false))
                result = GetNextFree(inRequiredBytes);
@@ -3911,17 +4289,6 @@ public:
             inAlloc->SetupStackAndCollect(false,forceCompact,true,true);
             result = GetNextFree(inRequiredBytes);
          }
-
-         #ifdef HXCPP_FUTURE_GC
-         if (!result)
-         {
-            // Prefer growing the heap (the concurrent collector will reclaim
-            //  it) over a stop-the-world compaction
-            bool dummyCompact = false;
-            if (AllocMoreBlocks(dummyCompact,false))
-               result = GetNextFree(inRequiredBytes);
-         }
-         #endif
 
          if (!result && !forceCompact)
          {
@@ -4570,11 +4937,11 @@ public:
 
       hx::VisitClassStatics(inCtx);
 
-      for(hx::RootSet::iterator i = hx::sgRootSet.begin(); i!=hx::sgRootSet.end(); ++i)
+      for(int i = 0; i < hx::sgRootSet.size(); i++)
       {
-         hx::Object **obj = *i;
-         if (*obj)
-            inCtx->visitObject(obj);
+      hx::Object **obj = hx::sgRootSet[i];
+      if (*obj)
+      inCtx->visitObject(obj);
       }
 
 
@@ -4780,12 +5147,6 @@ public:
    {
       hx::MarkContext context(inId);
 
-      #ifdef HXCPP_TRACY
-      char threadName[32];
-      snprintf(threadName,sizeof(threadName),"hxcpp gc worker %d",inId);
-      HX_GC_TRACY_THREAD(threadName);
-      #endif
-
       while(true)
       {
          waitForThreadWake(inId);
@@ -4797,7 +5158,6 @@ public:
 
          if (sgThreadPoolJob==tpjMark)
          {
-            HX_GC_TRACY_ZONE_CONCURRENT("GC mark");
             context.processMarkStack();
          }
          else if (sgThreadPoolJob==tpjAsyncZeroJit)
@@ -4832,9 +5192,10 @@ public:
       }
    }
 
-   static void SThreadLoop( void *inInfo )
+   static THREAD_FUNC_TYPE SThreadLoop( void *inInfo )
    {
       sGlobalAlloc->ThreadLoop((int)(size_t)inInfo);
+      THREAD_FUNC_RET;
    }
 
    void CreateWorker(int inId)
@@ -4852,9 +5213,7 @@ public:
 
          sThreadSleeping[inId] = false;
 
-         std::thread thread(SThreadLoop, info);
-
-         thread.detach();
+         HxCreateDetachedThread(SThreadLoop, info);
       #endif
    }
 
@@ -4966,8 +5325,14 @@ public:
    double tMarkLocal;
    double tMarkLocalEnd;
    double tMarked;
+
+   // Line-profile timestamps for MarkAll sub-phases (always present so Collect
+   // can read them without #ifdef mess; they're only written under HXCPP_GC_LINE_PROFILE).
+   double tMA_entry, tMA_afterInit, tMA_afterRoots, tMA_afterLocal, tMA_afterTransitive, tMA_afterFinalizers, tMA_exit;
    void MarkAll(bool inGenerational)
    {
+      GC_LP_SET(tMA_entry);
+
       if (!inGenerational)
       {
          hx::gPrevByteMarkID = hx::gByteMarkID;
@@ -5009,6 +5374,7 @@ public:
       }
 
       MEM_STAMP(tMarkInit);
+      GC_LP_SET(tMA_afterInit);
 
       #ifdef PROFILE_THREAD_USAGE
       for(int i=-1;i<MAX_GC_THREADS;i++)
@@ -5024,9 +5390,9 @@ public:
       {
       hx::AutoMarkPush info(&mMarker,"Roots","root");
 
-      for(hx::RootSet::iterator i = hx::sgRootSet.begin(); i!=hx::sgRootSet.end(); ++i)
+      for(int i = 0; i < hx::sgRootSet.size(); i++)
       {
-         hx::Object *&obj = **i;
+      hx::Object *&obj = *hx::sgRootSet[i];
          if (obj)
             hx::MarkObjectAlloc(obj , &mMarker );
       }
@@ -5057,6 +5423,7 @@ public:
       } // automark
 
       MEM_STAMP(tMarkLocal);
+      GC_LP_SET(tMA_afterRoots);
       hx::localCount = 0;
 
       mMarker.isGenerational = inGenerational;
@@ -5071,6 +5438,7 @@ public:
       #endif
 
       MEM_STAMP(tMarkLocalEnd);
+      GC_LP_SET(tMA_afterLocal);
 
       #ifdef HX_MULTI_THREAD_MARKING
          mMarker.releaseJobs();
@@ -5084,10 +5452,12 @@ public:
 
 
       MEM_STAMP(tMarked);
+      GC_LP_SET(tMA_afterTransitive);
 
       hx::FindZombies(mMarker);
 
-      hx::RunFinalizers();
+      hx::RunFinalizers(&mMarker);
+      GC_LP_SET(tMA_afterFinalizers);
 
       #ifdef HXCPP_GC_VERIFY
       for(int i=0;i<mAllBlocks.size();i++)
@@ -5130,18 +5500,23 @@ public:
 
    void Collect(bool inMajor, bool inForceCompact, bool inLocked,bool inFreeIsFragged)
    {
-      PROFILE_COLLECT_SUMMARY_START;
-
-      #ifdef HXCPP_FUTURE_GC
-      // A concurrent cycle is in flight - ask it to finish soon and wait for
-      //  it instead of collecting.  The remark pause rebuilds the free lists,
-      //  so the caller can simply retry its allocation.
-      if (sgFutureCycleActive)
-      {
-         FutureGcWaitForCycle(inLocked);
-         return;
-      }
+      #ifdef HXCPP_GC_LINE_PROFILE
+      fprintf(stderr, "[gc.profile] Collect(major=%d, force=%d) called\n",
+              (int)inMajor, (int)inForceCompact);
+      fflush(stderr);
       #endif
+
+      GC_LP_STAMP(lp_t0);
+      GC_LP_STAMP(lp_t1); GC_LP_STAMP(lp_t2); GC_LP_STAMP(lp_t3);
+      GC_LP_STAMP(lp_t4); GC_LP_STAMP(lp_t5); GC_LP_STAMP(lp_t6);
+      GC_LP_STAMP(lp_t7); GC_LP_STAMP(lp_t8); GC_LP_STAMP(lp_t9);
+      GC_LP_STAMP(lp_t10); GC_LP_STAMP(lp_t11); GC_LP_STAMP(lp_t12);
+      GC_LP_STAMP(lp_t13); GC_LP_STAMP(lp_t14); GC_LP_STAMP(lp_t15);
+      GC_LP_STAMP(lp_t16); GC_LP_STAMP(lp_t17); GC_LP_STAMP(lp_t18);
+      GC_LP_STAMP(lp_t_end);
+      GC_LP_SET(lp_t0);
+
+      PROFILE_COLLECT_SUMMARY_START;
 
       #ifndef HXCPP_SINGLE_THREADED_APP
       // If we set the flag from 0 -> 0xffffffff then we are the collector
@@ -5166,13 +5541,9 @@ public:
       }
       #endif
 
+      GC_LP_SET(lp_t1);  // after collector CAS
+
       STAMP(t0)
-
-      HX_GC_TRACY_ZONE_STW("GC collect");
-
-      #ifdef HXCPP_FUTURE_GC
-      double futureT0 = __hxcpp_time_stamp();
-      #endif
 
       // We are the collector - all must wait for us
       LocalAllocator *this_local = 0;
@@ -5187,12 +5558,13 @@ public:
             WaitForSafe(mLocalAllocs[i]);
       #endif
 
+      GC_LP_SET(lp_t2);  // after WaitForSafe
+
       sgIsCollecting = true;
-      #ifdef HXCPP_FUTURE_GC
-      sgFutureHadFirstCollect = true;
-      #endif
 
       StopThreadJobs(true);
+
+      GC_LP_SET(lp_t3);  // after StopThreadJobs
       #ifdef HXCPP_DEBUG
       sgAllocsSinceLastSpam = 0;
       #endif
@@ -5218,12 +5590,14 @@ public:
       __hxt_gc_start();
       #endif
 
-      size_t freeFraggedRows = 0; 
+      size_t freeFraggedRows = 0;
       if (inFreeIsFragged)
       {
          for(int i=mNextFreeBlockOfSize[0]; i<mFreeBlocks.size(); i++)
             freeFraggedRows += mFreeBlocks[i]->GetFreeRows();
       }
+
+      GC_LP_SET(lp_t4);  // after freeFraggedRows + telemetry
 
       // Now all threads have mTopOfStack & mBottomOfStack set.
       bool generational = false; 
@@ -5245,15 +5619,7 @@ public:
       }
 
       hx::QuickVec<hx::Object *> rememberedSet;
-      #ifdef HXCPP_FUTURE_GC
-      // Majors run concurrently: do a minor collect now, and (maybe) kick off
-      //  a concurrent mark cycle at the end of this pause.  Only an explicit
-      //  compact still uses the classic full stop-the-world path.
-      bool futureWantCycle = inMajor && !inForceCompact;
-      generational = !inForceCompact;
-      #else
       generational = !inMajor && !inForceCompact && sGcMode == gcmGenerational;
-      #endif
       if (sGcMode==gcmGenerational)
       {
          hx::sGlobalChunks.copyPointers(rememberedSet,!generational);
@@ -5265,9 +5631,13 @@ public:
       }
       #endif
 
+      GC_LP_SET(lp_t5);  // after generational remembered-set patching
+
       STAMP(t1)
 
       MarkAll(generational);
+
+      GC_LP_SET(lp_t6);  // after MarkAll
 
       #ifdef HX_GC_VERIFY_GENERATIONAL
       {
@@ -5284,6 +5654,8 @@ public:
       }
       #endif
 
+      GC_LP_SET(lp_t7);  // after verify-generational
+
       STAMP(t2)
 
 
@@ -5294,13 +5666,7 @@ public:
       if (!generational)
          sgTimeToNextTableUpdate--;
 
-      #ifdef HXCPP_FUTURE_GC
-      // Full (table-updating) reclaims happen in the remark pause of
-      //  concurrent cycles - the only classic full collect left is compaction
-      bool full = inForceCompact;
-      #else
       bool full = inMajor || (sgTimeToNextTableUpdate<=0) || inForceCompact;
-      #endif
 
       // Setup memory target ...
       // Count free rows, and prep blocks for sorting
@@ -5333,10 +5699,6 @@ public:
             verifyAllocStart();
             #endif
 
-            #ifdef HXCPP_FUTURE_GC
-            // Old generation needs collecting - run it concurrently
-            futureWantCycle = true;
-            #else
             generational = false;
             MarkAll(generational);
 
@@ -5345,13 +5707,14 @@ public:
 
             stats.clear();
             reclaimBlocks(full,stats);
-            #endif
          }
       }
       else
       {
          reclaimBlocks(full,stats);
       }
+
+      GC_LP_SET(lp_t8);  // after reclaimBlocks (incl gen retry)
 
 
       #ifdef HXCPP_GC_GENERATIONAL
@@ -5381,6 +5744,8 @@ public:
          }
       }
       #endif
+
+      GC_LP_SET(lp_t9);  // after GC_MOVING ratio check / second reclaim
 
       if (full)
       {
@@ -5413,6 +5778,7 @@ public:
       size_t bytesInUse = mRowsInUse<<IMMIX_LINE_BITS;
 
       STAMP(t3)
+      GC_LP_SET(lp_t10);  // before large sweep
 
 
       #ifdef HXCPP_TELEMETRY
@@ -5422,12 +5788,18 @@ public:
 
       // Sweep large
 
-      // Manage recycle size ?
-      //  clear old frames recycle objects
-      int l2 = largeObjectRecycle.size();
-      for(int i=0;i<largeObjectRecycle.size();i++)
-         HxFree(largeObjectRecycle[i]);
-      largeObjectRecycle.setSize(0);
+      // Clear the recycle pool from last cycle — defer the frees to avoid
+      // calling HxFree() (≈7µs each) during the GC pause.
+      int l2 = 0;
+      for (auto &kv : mLargeRecycleBySize)
+      {
+         std::vector<unsigned int *> &bucket = kv.second;
+         l2 += (int)bucket.size();
+         for (size_t i = 0; i < bucket.size(); i++)
+            mDeferredLargeFrees.push(bucket[i]);
+      }
+      mLargeRecycleBySize.clear();
+      mLargeRecycleBytes = 0;
 
       size_t recycleRemaining = 0;
       #ifdef RECYCLE_LARGE
@@ -5435,35 +5807,47 @@ public:
          recycleRemaining = mLargeAllocForceRefresh;
       #endif
 
-      int idx = 0;
+      // Stable partition sweep of mLargeList.
+      // Dead blobs are either recycled or deferred-freed (never HxFree'd inline).
       int l0 = mLargeList.size();
-      while(idx<mLargeList.size())
+      int write = 0;
+      for (int read = 0; read < l0; read++)
       {
-         unsigned int *blob = mLargeList[idx];
+         unsigned int *blob = mLargeList[read];
          if ( (blob[1] & IMMIX_ALLOC_MARK_ID) != hx::gMarkID )
          {
             unsigned int size = *blob;
             mLargeAllocated -= size;
+            mLargeIndex.erase(blob);
             if (size < recycleRemaining)
             {
                recycleRemaining -= size;
-               largeObjectRecycle.push(blob);
+               mLargeRecycleBySize[size].push_back(blob);
+               mLargeRecycleBytes += size;
             }
             else
             {
-               HxFree(blob);
+               // Defer the free — push to queue, drain later during CallAlloc.
+               mDeferredLargeFrees.push(blob);
             }
-
-            mLargeList.qerase(idx);
          }
          else
-            idx++;
+         {
+            if (write != read)
+            {
+               mLargeList[write] = blob;
+               mLargeIndex.insert(blob, write);
+            }
+            write++;
+         }
       }
+      mLargeList.setSize(write);
 
       int l1 = mLargeList.size();
 
 
       STAMP(t4)
+      GC_LP_SET(lp_t11);  // after large sweep
 
       bool defragged = false;
 
@@ -5573,6 +5957,7 @@ public:
 
 
       STAMP(t5)
+      GC_LP_SET(lp_t12);  // after defrag
 
       size_t mem = mRowsInUse<<IMMIX_LINE_BITS;
       size_t baseMem = full ? bytesInUse : mem;
@@ -5618,12 +6003,6 @@ public:
       double filled_ratio = (double)mRowsInUse/(double)(mAllBlocksCount*IMMIX_USEFUL_LINES);
       double after_gen = filled_ratio + (1.0-filled_ratio)*mGenerationalRetainEstimate;
 
-      #ifdef HXCPP_FUTURE_GC
-      // Stay generational; old-generation pressure starts a concurrent cycle
-      sGcMode = gcmGenerational;
-      if (generational && after_gen >= sgFutureTriggerRatio)
-         futureWantCycle = true;
-      #else
       if (after_gen<0.75)
       {
          sGcMode = gcmGenerational;
@@ -5634,7 +6013,6 @@ public:
          // What was I thinking here?  This breaks #851
          //gByteMarkID |= 0x30;
       }
-      #endif
 
       #ifdef SHOW_MEM_EVENTS
       GCLOG("filled=%.2f%% + estimate = %.2f%% = %.2f%% -> %s\n",
@@ -5645,17 +6023,13 @@ public:
 
       createFreeList();
 
-      #ifdef HXCPP_FUTURE_GC
-      bool futureStartCycle = futureWantCycle && !sgFutureCycleActive &&
-                                sgInternalEnable && !inForceCompact;
-      if (!futureStartCycle)
-         backgroundProcessFreeList(true);
-      // else: the worker pool belongs to the concurrent markers until remark
-      #else
+      GC_LP_SET(lp_t13);  // after createFreeList
+
       // This saves some running/stall time, but increases the total CPU usage
       // Delaying it until just before the block is used to improve the cache locality
       backgroundProcessFreeList(true);
-      #endif
+
+      GC_LP_SET(lp_t14);  // after backgroundProcessFreeList
 
       mAllBlocksCount   = mAllBlocks.size();
       mCurrentRowsInUse = mRowsInUse;
@@ -5705,6 +6079,8 @@ public:
       #endif
 
 
+      GC_LP_SET(lp_t15);  // after gen reinit + verify
+
       #ifdef HXCPP_GC_VERIFY
       VerifyBlockOrder();
       #endif
@@ -5716,26 +6092,10 @@ public:
             ClearPooledAlloc(l);
       }
 
+      GC_LP_SET(lp_t16);  // after ClearPooledAlloc
+
       #ifdef HXCPP_TELEMETRY
       __hxt_gc_end();
-      #endif
-
-      HX_GC_TRACY_TEXT(generational ? "minor" : "full");
-      HX_GC_TRACY_PLOT("GC/used (MB)", (double)MemUsage()/(1024.0*1024.0));
-      HX_GC_TRACY_PLOT("GC/reserved (MB)", (double)MemReserved()/(1024.0*1024.0));
-
-      #ifdef HXCPP_FUTURE_GC
-      sgFutureGrowthCap = (mRowsInUse<<IMMIX_LINE_BITS) + mLargeAllocated + sgFutureNurseryBudget;
-
-      if (futureStartCycle)
-      {
-         HX_GC_TRACY_MESSAGE("GC concurrent cycle starting");
-         FutureGcStartCycleLocked();
-      }
-
-      if (sgFutureVerbose)
-         GCLOG("Future GC: %s pause %.3fms%s\n", generational ? "minor" : "full",
-               (__hxcpp_time_stamp()-futureT0)*1000.0, futureStartCycle ? " (cycle started)" : "");
       #endif
 
       sgIsCollecting = false;
@@ -5760,431 +6120,78 @@ public:
         #endif
       #endif
 
+      GC_LP_SET(lp_t17);  // after releasing threads
+      GC_LP_SET(lp_t_end);
+
+      #ifdef HXCPP_GC_LINE_PROFILE
+      {
+         double total = GC_LP_MS(lp_t0, lp_t_end);
+         GCLOG("=== GC LINE PROFILE %s full=%d major=%d === total=%.3f ms\n",
+               generational ? "GEN" : "STD", (int)full, (int)inMajor, total);
+         GCLOG("  [01] try-collector CAS         %8.3f ms\n", GC_LP_MS(lp_t0, lp_t1));
+         GCLOG("  [02] lock + WaitForSafe        %8.3f ms\n", GC_LP_MS(lp_t1, lp_t2));
+         GCLOG("  [03] StopThreadJobs            %8.3f ms\n", GC_LP_MS(lp_t2, lp_t3));
+         GCLOG("  [04] telemetry + fragRows      %8.3f ms\n", GC_LP_MS(lp_t3, lp_t4));
+         GCLOG("  [05] gen remembered-set patch  %8.3f ms\n", GC_LP_MS(lp_t4, lp_t5));
+         GCLOG("  [06] MarkAll TOTAL             %8.3f ms\n", GC_LP_MS(lp_t5, lp_t6));
+         GCLOG("       [06a] mark init+clr       %8.3f ms\n", GC_LP_MS(tMA_entry, tMA_afterInit));
+         GCLOG("       [06b] mark roots+zombies  %8.3f ms\n", GC_LP_MS(tMA_afterInit, tMA_afterRoots));
+         GCLOG("       [06c] mark local stacks   %8.3f ms\n", GC_LP_MS(tMA_afterRoots, tMA_afterLocal));
+         GCLOG("       [06d] mark transitive     %8.3f ms\n", GC_LP_MS(tMA_afterLocal, tMA_afterTransitive));
+         GCLOG("       [06e] zombies+finalizers  %8.3f ms  (FindZombies=%.3f zombies=%d)\n",
+               GC_LP_MS(tMA_afterTransitive, tMA_afterFinalizers),
+               GC_LP_MS(gFZ_t0, gFZ_t1), gFZ_nZombies);
+         GCLOG("             [06e-f1] sgFinalizers    %8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t0, gRF_t1), gRF_nFinalizers, gRF_killedFinalizers);
+         GCLOG("             [06e-f2] sFinalizableList%8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t1, gRF_t2), gRF_nFinalizable, gRF_killedFinalizable);
+         GCLOG("             [06e-f3] sFinalizerMap   %8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t2, gRF_t3), gRF_nFinalizerMap, gRF_killedFinalizerMap);
+         #ifdef HXCPP_DEFER_HAXE_FINALIZERS
+         GCLOG("             [06e-f4] sHaxeFinalizer  %8.3f ms  (n=%d killed=%d deferred=%d)\n", GC_LP_MS(gRF_t3, gRF_t4), gRF_nHaxeFinalizerMap, gRF_killedHaxeFinalizerMap, (int)GetDeferredFinalizers().size());
+         #else
+         GCLOG("             [06e-f4] sHaxeFinalizer  %8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t3, gRF_t4), gRF_nHaxeFinalizerMap, gRF_killedHaxeFinalizerMap);
+         #endif
+         GCLOG("             [06e-f5] sObjectIdMap    %8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t4, gRF_t5), gRF_nObjectIdMap, gRF_killedObjectIdMap);
+         GCLOG("             [06e-f6] sWeakHashList   %8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t5, gRF_t6), gRF_nWeakHash, gRF_killedWeakHash);
+         GCLOG("             [06e-f7] sWeakRefs       %8.3f ms  (n=%d killed=%d)\n", GC_LP_MS(gRF_t6, gRF_t7), gRF_nWeakRefs, gRF_killedWeakRefs);
+         GCLOG("  [07] verify-generational       %8.3f ms\n", GC_LP_MS(lp_t6, lp_t7));
+         GCLOG("  [08] reclaimBlocks             %8.3f ms\n", GC_LP_MS(lp_t7, lp_t8));
+         GCLOG("  [09] GC_MOVING ratio check     %8.3f ms\n", GC_LP_MS(lp_t8, lp_t9));
+         GCLOG("  [10] large sweep               %8.3f ms  (%d->%d blobs)\n", GC_LP_MS(lp_t10, lp_t11), l0, l1);
+         GCLOG("  [11] defrag (MoveBlocks)       %8.3f ms\n", GC_LP_MS(lp_t11, lp_t12));
+         GCLOG("  [12] createFreeList            %8.3f ms\n", GC_LP_MS(lp_t12, lp_t13));
+         GCLOG("  [13] backgroundProcessFreeList %8.3f ms\n", GC_LP_MS(lp_t13, lp_t14));
+         GCLOG("  [14] gen reinit + verify       %8.3f ms\n", GC_LP_MS(lp_t14, lp_t15));
+         GCLOG("  [15] ClearPooledAlloc          %8.3f ms\n", GC_LP_MS(lp_t15, lp_t16));
+         GCLOG("  [16] release threads           %8.3f ms\n", GC_LP_MS(lp_t16, lp_t17));
+         GCLOG("  --- blocks=%d  rowsInUse=%zu  largeBlobs=%d  largeBytes=%zu\n",
+               (int)mAllBlocks.size(), (size_t)mRowsInUse, l1, (size_t)mLargeAllocated);
+      }
+      #endif
 
       PROFILE_COLLECT_SUMMARY_END;
    }
 
-   #ifdef HXCPP_FUTURE_GC
-
-   // Push every root (statics, gc roots, zombies, conservative thread stacks)
-   //  onto the global mark queue without recursing into them.
-   void FutureMarkRoots()
-   {
-      mMarker.init();
-      mMarker.isGenerational = false;
-
-      hx::MarkClassStatics(&mMarker);
-
-      for(hx::RootSet::iterator i = hx::sgRootSet.begin(); i!=hx::sgRootSet.end(); ++i)
-      {
-         hx::Object *&obj = **i;
-         if (obj)
-            hx::MarkObjectAlloc(obj , &mMarker );
-      }
-
-      if (hx::sgOffsetRootSet)
-         for(hx::OffsetRootSet::iterator i = hx::sgOffsetRootSet->begin(); i!=hx::sgOffsetRootSet->end(); ++i)
-         {
-            char *ptr = *(char **)(i->first);
-            int offset = i->second;
-            hx::Object *obj = (hx::Object *)(ptr - offset);
-            if (obj)
-               hx::MarkObjectAlloc(obj , &mMarker );
-         }
-
-      for(int i=0;i<hx::sZombieList.size();i++)
-         hx::MarkObjectAlloc(hx::sZombieList[i] , &mMarker );
-
-      for(int i=0;i<mLocalAllocs.size();i++)
-         MarkLocalAlloc(mLocalAllocs[i] , &mMarker);
-
-      mMarker.releaseJobs();
-   }
-
-
-   // Called at the end of a minor collect's pause: flip the mark ids, arm
-   //  the concurrent write barriers and snapshot the roots.  The coordinator
-   //  thread takes over once the world resumes.
-   void FutureGcStartCycleLocked()
-   {
-      // Flip mark ids - every existing allocation becomes "white"
-      hx::gPrevByteMarkID = hx::gByteMarkID;
-      hx::gPrevMarkIdMask = ((~hx::gMarkID) & 0x30000000) | HX_GC_CONST_ALLOC_BIT;
-
-      gByteMarkID = (gByteMarkID + 1) & 0x0f;
-      if (gByteMarkID & 0x1)
-         gByteMarkID |= 0x20;
-      else
-         gByteMarkID |= 0x10;
-
-      hx::gMarkID = gByteMarkID << 24;
-      hx::gMarkIDWithContainer = (gByteMarkID << 24) | IMMIX_ALLOC_IS_CONTAINER;
-      gRememberedByteMarkID = gByteMarkID | HX_GC_REMEMBERED;
-      gBlockStack = 0;
-
-      // Size + zero the shadow row slab, with headroom for heap growth
-      int needed = gBlockInfo ? gBlockInfo->size() : 0;
-      int capacity = needed + needed/2 + (8<<IMMIX_BLOCK_GROUP_BITS);
-      if (capacity > sgFutureShadowCapacity)
-      {
-         if (sgFutureShadowRows)
-            HxFree(sgFutureShadowRows);
-         sgFutureShadowRows = (unsigned char *)HxAlloc( (size_t)capacity * IMMIX_LINES );
-         sgFutureShadowCapacity = capacity;
-      }
-      ZERO_MEM(sgFutureShadowRows, (size_t)sgFutureShadowCapacity * IMMIX_LINES);
-
-      // Arm the concurrent write barriers + allocate-black.  The mutators are
-      //  all stopped at safe points, so they observe this consistently.
-      hx::gFutureGcMarkActive = 1;
-
-      FutureMarkRoots();
-
-      FutureGcEnsureCoordinator();
-
-      {
-         std::lock_guard<std::mutex> l(*sgFutureLock);
-         sgFutureCycleActive = 1;
-         sgFutureWake->notify_all();
-      }
-
-      #ifdef SHOW_MEM_EVENTS
-      GCLOG("Future GC: concurrent cycle started (mark byte %02x)\n", gByteMarkID);
-      #endif
-   }
-
-
-   // The final, short stop-the-world phase of a concurrent cycle: re-scan
-   //  roots and stacks, drain the residual mark queue + dirty objects, run
-   //  finalizers and prepare the heap for reuse (sweep accounting).
-   void FutureRemark()
-   {
-      HX_GC_TRACY_ZONE_STW("GC remark");
-
-      double tLock0 = __hxcpp_time_stamp();
-      gThreadStateChangeLock->lock();
-      _hx_atomic_compare_exchange((volatile int *)&hx::gPauseForCollect, 0, 0xffffffff);
-
-      for(int i=0;i<mLocalAllocs.size();i++)
-         WaitForSafe(mLocalAllocs[i]);
-
-      sgIsCollecting = true;
-
-      #ifdef HXCPP_TELEMETRY
-      __hxt_gc_start();
-      #endif
-
-      // Flush per-thread gray (shade) and dirty chunks
-      for(int i=0;i<mLocalAllocs.size();i++)
-      {
-         hx::StackContext *ctx = (hx::StackContext *)mLocalAllocs[i];
-         if (ctx->mOldReferrers)
-         {
-            if (ctx->mOldReferrers->count)
-               hx::sGlobalChunks.addLocked( ctx->mOldReferrers );
-            else
-               hx::sGlobalChunks.free( ctx->mOldReferrers );
-            ctx->mOldReferrers = 0;
-         }
-         if (ctx->mFutureDirty)
-         {
-            if (ctx->mFutureDirty->count)
-               FutureGcPushDirtyChunk( ctx->mFutureDirty );
-            else
-               hx::sGlobalChunks.free( ctx->mFutureDirty );
-            ctx->mFutureDirty = 0;
-         }
-      }
-
-      double tRoots0 = __hxcpp_time_stamp();
-
-      // Re-scan roots & stacks - catches references that migrated to the
-      //  stack/registers/statics during concurrent marking
-      FutureMarkRoots();
-
-      double tDirty0 = __hxcpp_time_stamp();
-      int dirtyCount = 0;
-
-      // Queue marked dirty objects for a consistent re-scan
-      mMarker.init();
-      mMarker.isGenerational = false;
-      while(sgFutureDirtyList)
-      {
-         hx::MarkChunk *chunk = (hx::MarkChunk *)sgFutureDirtyList;
-         sgFutureDirtyList = chunk->next;
-         chunk->next = 0;
-         for(int i=0;i<chunk->count;i++)
-         {
-            hx::Object *obj = chunk->stack[i];
-            unsigned char &mark = ((unsigned char *)obj)[HX_ENDIAN_MARK_ID_BYTE];
-            if ( (mark & FULL_MARK_BYTE_MASK) == (gByteMarkID & FULL_MARK_BYTE_MASK) )
-            {
-               // Clear the remembered bit and re-scan
-               mark = (unsigned char)gByteMarkID;
-               mMarker.pushObj(obj);
-               dirtyCount++;
-            }
-            // else - was never marked: unreachable at remark = garbage
-         }
-         chunk->count = 0;
-         hx::sGlobalChunks.free(chunk);
-      }
-      mMarker.releaseJobs();
-
-      double tDrain0 = __hxcpp_time_stamp();
-
-      // Drain everything that is left, world stopped, all threads
-      StartThreadJobs(tpjMark, MAX_GC_THREADS, true);
-
-      double tFinal0 = __hxcpp_time_stamp();
-      hx::FindZombies(mMarker);
-      hx::RunFinalizers();
-
-      // Concurrent phase is over
-      hx::gFutureGcMarkActive = 0;
-
-      double tRows0 = __hxcpp_time_stamp();
-
-      // Swap the shadow row marks into place (dead rows drop out here) -
-      //  done per-block inside the threaded countRows/reclaim jobs below
-      sgFutureSwapShadow = true;
-
-      // Periodically do a full reclaim to scrub stale allocStart entries
-      //  before the 4-bit mark id wraps around
-      sgTimeToNextTableUpdate--;
-      bool full = sgTimeToNextTableUpdate<=0;
-      if (full)
-      {
-         #ifdef HXCPP_GC_MOVING
-         sgTimeToNextTableUpdate = 7;
-         #else
-         sgTimeToNextTableUpdate = 15;
-         #endif
-      }
-
-      BlockDataStats stats;
-      if (full)
-         reclaimBlocks(true,stats);
-      else
-         countRows(stats);
-      sgFutureSwapShadow = false;
-
-      mRowsInUse = stats.rowsInUse + stats.fraggedRows;
-      size_t bytesInUse = full ? stats.bytesInUse : (mRowsInUse<<IMMIX_LINE_BITS);
-
-      #ifdef HXCPP_TELEMETRY
-      __hxt_gc_after_mark(gByteMarkID, HX_ENDIAN_MARK_ID_BYTE);
-      #endif
-
-      double tLarge0 = __hxcpp_time_stamp();
-
-      // Sweep large objects
-      for(int i=0;i<largeObjectRecycle.size();i++)
-         HxFree(largeObjectRecycle[i]);
-      largeObjectRecycle.setSize(0);
-
-      size_t recycleRemaining = 0;
-      #ifdef RECYCLE_LARGE
-      recycleRemaining = mLargeAllocForceRefresh;
-      #endif
-
-      int idx = 0;
-      while(idx<mLargeList.size())
-      {
-         unsigned int *blob = mLargeList[idx];
-         if ( (blob[1] & IMMIX_ALLOC_MARK_ID) != hx::gMarkID )
-         {
-            unsigned int size = *blob;
-            mLargeAllocated -= size;
-            if (size < recycleRemaining)
-            {
-               recycleRemaining -= size;
-               largeObjectRecycle.push(blob);
-            }
-            else
-               HxFree(blob);
-
-            mLargeList.qerase(idx);
-         }
-         else
-            idx++;
-      }
-
-      // Update memory targets (mirrors the classic full-collect accounting)
-      size_t mem = mRowsInUse<<IMMIX_LINE_BITS;
-      size_t baseMem = full ? bytesInUse : mem;
-      #ifdef HXCPP_GC_DYNAMIC_SIZE
-      size_t targetFree = std::max((size_t)hx::sgMinimumFreeSpace, (size_t)(baseMem * profileCollectSummary.spaceFactor) );
-      #else
-      size_t targetFree = std::max((size_t)hx::sgMinimumFreeSpace, baseMem/100 *hx::sgTargetFreeSpacePercentage );
-      #endif
-      targetFree = std::min(targetFree, (size_t)sgMaximumFreeSpace );
-      sWorkingMemorySize = std::max( mem + targetFree, (size_t)hx::sgMinimumWorkingMemory);
-
-      int blockSize =  mAllBlocks.size()<<IMMIX_BLOCK_BITS;
-      if (blockSize > mLargeAllocSpace)
-         mLargeAllocSpace = blockSize;
-      mLargeAllocForceRefresh = mLargeAllocated + mLargeAllocSpace;
-
-      mTotalAfterLastCollect = MemUsage();
-
-      // After a major, drift the retain estimate back to optimistic
-      mGenerationalRetainEstimate += (0.2-mGenerationalRetainEstimate)*0.25;
-
-      sgFutureGrowthCap = (mRowsInUse<<IMMIX_LINE_BITS) + mLargeAllocated + sgFutureNurseryBudget;
-
-      HX_GC_TRACY_PLOT("GC/used (MB)", (double)MemUsage()/(1024.0*1024.0));
-      HX_GC_TRACY_PLOT("GC/reserved (MB)", (double)MemReserved()/(1024.0*1024.0));
-
-      double tFree0 = __hxcpp_time_stamp();
-      createFreeList();
-      backgroundProcessFreeList(true);
-
-      mAllBlocksCount   = mAllBlocks.size();
-      mCurrentRowsInUse = mRowsInUse;
-
-      if (sgFutureVerbose)
-      {
-         double tEnd = __hxcpp_time_stamp();
-         GCLOG("Future GC remark: stop=%.3f roots=%.3f dirty=%.3f(%d) drain=%.3f final=%.3f rows=%.3f large=%.3f free=%.3f ms\n",
-            (tRoots0-tLock0)*1000, (tDirty0-tRoots0)*1000, (tDrain0-tDirty0)*1000, dirtyCount,
-            (tFinal0-tDrain0)*1000, (tRows0-tFinal0)*1000, (tLarge0-tRows0)*1000,
-            (tFree0-tLarge0)*1000, (tEnd-tFree0)*1000);
-      }
-
-      // Re-arm the generational write barrier channels
-      for(int i=0;i<mLocalAllocs.size();i++)
-      {
-         hx::StackContext *ctx = (hx::StackContext *)mLocalAllocs[i];
-         ctx->mOldReferrers = hx::sGlobalChunks.alloc();
-      }
-
-      for(int i=0;i<LOCAL_POOL_SIZE;i++)
-      {
-         LocalAllocator *l = mLocalPool[i];
-         if (l)
-            ClearPooledAlloc(l);
-      }
-
-      #ifdef HXCPP_TELEMETRY
-      __hxt_gc_end();
-      #endif
-
-      #ifdef SHOW_MEM_EVENTS
-      GCLOG("Future GC: cycle complete, %s in use\n", formatBytes(mem).c_str());
-      #endif
-
-      sgIsCollecting = false;
-      sgFutureCycleActive = 0;
-      hx::gPauseForCollect = 0x00000000;
-
-      for(int i=0;i<mLocalAllocs.size();i++)
-      {
-         #ifdef HXCPP_SCRIPTABLE
-         ((hx::StackContext *)mLocalAllocs[i])->byteMarkId = hx::gByteMarkID;
-         #endif
-         ReleaseFromSafe(mLocalAllocs[i]);
-      }
-
-      gThreadStateChangeLock->unlock();
-   }
-
-
-   // Background thread: drives the concurrent mark phase of each cycle
-   void FutureCoordinatorLoop()
-   {
-      HX_GC_TRACY_THREAD("hxcpp gc coordinator");
-
-      while(true)
-      {
-         {
-            std::unique_lock<std::mutex> l(*sgFutureLock);
-            sgFutureWake->wait(l, []() { return sgFutureCycleActive!=0; });
-         }
-
-         double cycleT0 = __hxcpp_time_stamp();
-         HX_GC_TRACY_ZONE_CONCURRENT("GC concurrent cycle");
-
-         // Concurrent mark rounds: let the worker pool drain the queue while
-         //  the mutators keep running and feeding it via the write barriers
-         int quietRounds = 0;
-         while(true)
-         {
-            if (hx::sGlobalChunks.processList)
-            {
-               StartThreadJobs(tpjMark, MAX_GC_THREADS, true, sgFutureMarkThreads);
-               quietRounds = 0;
-               continue;
-            }
-            if (sgFutureAccelerate || ++quietRounds>=3)
-               break;
-            std::this_thread::sleep_for( std::chrono::microseconds(500) );
-         }
-
-         {
-            double remarkT0 = __hxcpp_time_stamp();
-            PROFILE_COLLECT_SUMMARY_START;
-            FutureRemark();
-            PROFILE_COLLECT_SUMMARY_END;
-            double now = __hxcpp_time_stamp();
-            sgFutureLastRemarkMs = (now-remarkT0)*1000.0;
-            if (sgFutureLastRemarkMs>sgFutureMaxRemarkMs)
-               sgFutureMaxRemarkMs = sgFutureLastRemarkMs;
-            sgFutureLastCycleMs = (now-cycleT0)*1000.0;
-            sgFutureCycleCount++;
-            if (sgFutureVerbose)
-               GCLOG("Future GC: cycle %d done - concurrent %.2fms, remark pause %.3fms (max %.3fms), %.1fMB in use\n",
-                     sgFutureCycleCount, sgFutureLastCycleMs-sgFutureLastRemarkMs,
-                     sgFutureLastRemarkMs, sgFutureMaxRemarkMs,
-                     (double)(mRowsInUse<<IMMIX_LINE_BITS)/(1024.0*1024.0));
-         }
-
-         {
-            std::lock_guard<std::mutex> l(*sgFutureLock);
-            sgFutureAccelerate = false;
-            sgFutureCycleGen++;
-            sgFutureWake->notify_all();
-         }
-      }
-   }
-
-   static void SFutureCoordinatorLoop(void *)
-   {
-      sGlobalAlloc->FutureCoordinatorLoop();
-   }
-
-   void FutureGcEnsureCoordinator()
-   {
-      if (!sgFutureCoordinatorStarted)
-      {
-         sgFutureCoordinatorStarted = true;
-         std::thread coordinator( SFutureCoordinatorLoop, (void *)0 );
-         coordinator.detach();
-      }
-   }
-
-   #endif // HXCPP_FUTURE_GC
-
    void reclaimBlocks(bool full, BlockDataStats &outStats)
    {
-      if (MAX_GC_THREADS>1)
+      // FIX: Only use multi-threading if the heap is large enough to justify the lock overhead.
+      // For < 1024 blocks, single-threaded SSE2 scanning is significantly faster.
+      if (MAX_GC_THREADS>1 && mAllBlocks.size() > 1024)
       {
          for(int i=0;i<MAX_GC_THREADS;i++)
-            sThreadBlockDataStats[i].clear();
+               sThreadBlockDataStats[i].clear();
          StartThreadJobs(full ? tpjReclaimFull : tpjReclaim, mAllBlocks.size(), true);
          outStats = sThreadBlockDataStats[0];
          for(int i=1;i<MAX_GC_THREADS;i++)
-            outStats.add(sThreadBlockDataStats[i]);
+               outStats.add(sThreadBlockDataStats[i]);
       }
       else
       {
          outStats.clear();
          for(int i=0;i<mAllBlocks.size();i++)
          {
-            if (full)
-               mAllBlocks[i]->reclaim<true>(&outStats);
-            else
-               mAllBlocks[i]->reclaim<false>(&outStats);
+               if (full)
+                  mAllBlocks[i]->reclaim<true>(&outStats);
+               else
+                  mAllBlocks[i]->reclaim<false>(&outStats);
          }
       }
    }
@@ -6192,20 +6199,21 @@ public:
 
    void countRows(BlockDataStats &outStats)
    {
-      if (MAX_GC_THREADS>1)
+      // FIX: Same threshold for countRows
+      if (MAX_GC_THREADS>1 && mAllBlocks.size() > 1024)
       {
          for(int i=0;i<MAX_GC_THREADS;i++)
-            sThreadBlockDataStats[i].clear();
+               sThreadBlockDataStats[i].clear();
          StartThreadJobs(tpjCountRows, mAllBlocks.size(), true);
          outStats = sThreadBlockDataStats[0];
          for(int i=1;i<MAX_GC_THREADS;i++)
-            outStats.add(sThreadBlockDataStats[i]);
+               outStats.add(sThreadBlockDataStats[i]);
       }
       else
       {
          outStats.clear();
          for(int i=0;i<mAllBlocks.size();i++)
-            mAllBlocks[i]->countRows(outStats);
+               mAllBlocks[i]->countRows(outStats);
       }
    }
 
@@ -6322,30 +6330,22 @@ public:
 
    MemType GetMemType(void *inPtr)
    {
+      // O(1) Rejection: Instantly reject 99% of stack pointers (ints, floats, engine ptrs)
+      char *p = (char *)inPtr;
+      if (p < mHeapMin || p > mHeapMax) return memUnmanaged;
+
       BlockData *block = (BlockData *)( ((size_t)inPtr) & IMMIX_BLOCK_BASE_MASK);
 
       bool isBlock = IsAllBlock(block);
-      /*
-      bool found = false;
-      for(int i=0;i<mAllBlocks.size();i++)
-      {
-         if (mAllBlocks[i]==block)
-         {
-            found = true;
-            break;
-         }
-      }
-      */
 
       if (isBlock)
          return memBlock;
 
-      for(int i=0;i<mLargeList.size();i++)
-      {
-         unsigned int *blob = mLargeList[i] + 2;
-         if (blob==inPtr)
-            return memLarge;
-      }
+      // O(1) hash probe — was O(n) linear scan of mLargeList.
+      // User pointer is blob+2; recover blob and look it up.
+      unsigned int *blob = ((unsigned int *)inPtr) - 2;
+      if (mLargeIndex.find(blob) != -1)
+         return memLarge;
 
       return memUnmanaged;
    }
@@ -6374,48 +6374,26 @@ public:
    std::mutex mLargeListLock;
    hx::QuickVec<LocalAllocator *> mLocalAllocs;
    LocalAllocator *mLocalPool[LOCAL_POOL_SIZE];
-   hx::QuickVec<unsigned int *> largeObjectRecycle;
+
+   // --- Large-object fast-path structures ---
+   // Size-bucketed recycle pool (replaces flat largeObjectRecycle).
+   // O(1) size-match lookup instead of O(n) linear scan.
+   LargeRecyclePool mLargeRecycleBySize;
+   size_t mLargeRecycleBytes = 0;
+
+   // O(1) blob→index map for GetMemType and FreeLarge.
+   // Maintained under mLargeListLock alongside mLargeList.
+   LargeIndexMap mLargeIndex;
+
+   // Deferred free queue for large blobs.  During the GC pause, dead blobs are
+   // pushed here instead of calling HxFree() inline.  They're drained 2-at-a-time
+   // during CallAlloc, spreading the free() cost across normal execution.
+   // This keeps the GC pause free of OS heap overhead (~7µs per free()).
+   hx::QuickVec<unsigned int *> mDeferredLargeFrees;
+
+   char *mHeapMin;
+   char *mHeapMax;
 };
-
-
-#ifdef HXCPP_FUTURE_GC
-
-// Ask the running concurrent cycle to finish soon and wait (gc-safely) for
-//  its completion.  Used instead of a stop-the-world collect whenever one is
-//  requested while a cycle is in flight.
-static void FutureGcWaitForCycle(bool inLocked)
-{
-   HX_GC_TRACY_ZONE_WAIT("GC wait for cycle");
-
-   int gen = sgFutureCycleGen;
-   {
-      std::lock_guard<std::mutex> l(*sgFutureLock);
-      if (!sgFutureCycleActive)
-         return;
-      sgFutureAccelerate = true;
-      sgFutureWake->notify_all();
-   }
-
-   if (inLocked)
-      gThreadStateChangeLock->unlock();
-
-   // The remark pause needs this thread to be gc-safe while it waits
-   hx::EnterGCFreeZone();
-   {
-      std::unique_lock<std::mutex> l(*sgFutureLock);
-      sgFutureWake->wait(l, [gen]() { return !sgFutureCycleActive || sgFutureCycleGen!=gen; });
-   }
-   hx::ExitGCFreeZone();
-
-   if (inLocked)
-   {
-      hx::EnterGCFreeZone();
-      gThreadStateChangeLock->lock();
-      hx::ExitGCFreeZoneLocked();
-   }
-}
-
-#endif // HXCPP_FUTURE_GC
 
 
 
@@ -6703,16 +6681,6 @@ public:
             hx::sGlobalChunks.free( mOldReferrers );
          mOldReferrers = 0;
       }
-      #ifdef HXCPP_FUTURE_GC
-      if (mFutureDirty)
-      {
-         if (mFutureDirty->count)
-            hx::FutureGcPushDirtyChunk(mFutureDirty);
-         else
-            hx::sGlobalChunks.free(mFutureDirty);
-         mFutureDirty = 0;
-      }
-      #endif
       #endif
 
       #ifndef HXCPP_EXPLICIT_STACK_EXTENT
@@ -6863,7 +6831,6 @@ public:
 
    void PauseForCollect()
    {
-      HX_GC_TRACY_ZONE_WAIT("GC pause");
       #ifndef HXCPP_SINGLE_THREADED_APP
       volatile int dummy = 1;
       mBottomOfStack = (int *)&dummy;
@@ -7053,6 +7020,54 @@ public:
 
    void *CallAlloc(int inSize,unsigned int inObjectFlags)
    {
+      #ifdef HXCPP_DEFER_HAXE_FINALIZERS
+      // Auto-drain: process a few deferred finalizers on each allocation.
+      // This spreads the finalizer cost across normal execution without
+      // requiring any Haxe-side changes.  Budget: 4 per alloc call, which
+      // at ~1000 allocs/frame drains ~2000 finalizers/frame at 60fps.
+      if (GetDeferredFinalizers().size() > 0)
+      {
+         // Quick inline drain — avoid function call overhead for the common
+         // case where the queue is empty or nearly empty.
+         int n = GetDeferredFinalizers().size();
+         int budget = n < 4 ? n : 4;
+         for (int i = 0; i < budget; i++)
+         {
+            DeferredFinalizerEntry &df = GetDeferredFinalizers()[i];
+            (*df.func)(df.obj);
+         }
+         // Compact
+         int write = 0;
+         for (int i = budget; i < n; i++)
+         {
+            if (write != i)
+               GetDeferredFinalizers()[write] = GetDeferredFinalizers()[i];
+            write++;
+         }
+         GetDeferredFinalizers().setSize(write);
+      }
+      #endif
+
+      // Auto-drain deferred large-blob frees.  Each free() costs ~7µs (OS heap
+      // overhead), so freeing 500 blobs during the GC pause would add 3.5ms.
+      // Instead we push them to a queue during the pause and free 2 per alloc.
+      if (sGlobalAlloc->mDeferredLargeFrees.size() > 0)
+      {
+         int n = sGlobalAlloc->mDeferredLargeFrees.size();
+         int budget = n < 4 ? n : 4;
+         for (int i = 0; i < budget; i++)
+            HxFree(sGlobalAlloc->mDeferredLargeFrees[i]);
+         // Compact
+         int write = 0;
+         for (int i = budget; i < n; i++)
+         {
+            if (write != i)
+               sGlobalAlloc->mDeferredLargeFrees[write] = sGlobalAlloc->mDeferredLargeFrees[i];
+            write++;
+         }
+         sGlobalAlloc->mDeferredLargeFrees.setSize(write);
+      }
+
       #ifndef HXCPP_SINGLE_THREADED_APP
       #if HXCPP_DEBUG
       if (mGCFreeZone)
@@ -7091,12 +7106,6 @@ public:
                spaceFirst = end;
 
                int size = allocSize - 4;
-               #ifdef HXCPP_FUTURE_GC
-               if (hx::gFutureGcMarkActive)
-                  hx::FutureGcAllocBlackHeader(this, buffer, size,
-                        (inObjectFlags & IMMIX_ALLOC_IS_CONTAINER)!=0);
-               else
-               #endif
                ((unsigned int *)buffer)[-1] = size | inObjectFlags;
 
                #if defined(HXCPP_GC_CHECK_POINTER) && defined(HXCPP_GC_DEBUG_ALWAYS_MOVE)
@@ -7406,34 +7415,6 @@ void InitAlloc()
 
    hx::CommonInitAlloc();
    sgAllocInit = true;
-
-   #ifdef HXCPP_FUTURE_GC
-   sgFutureLock = new std::mutex();
-   sgFutureWake = new std::condition_variable();
-   #if !defined(HX_WINRT) && !defined(__SNC__) && !defined(__ORBIS__)
-   if (const char *threads = getenv("HXCPP_FUTURE_GC_MARK_THREADS"))
-   {
-      int t = atoi(threads);
-      if (t>0 && t<=MAX_GC_THREADS)
-         sgFutureMarkThreads = t;
-   }
-   if (const char *trigger = getenv("HXCPP_FUTURE_GC_TRIGGER"))
-   {
-      double ratio = atof(trigger);
-      if (ratio>0.1 && ratio<0.95)
-         sgFutureTriggerRatio = ratio;
-   }
-   if (getenv("HXCPP_FUTURE_GC_VERBOSE"))
-      sgFutureVerbose = true;
-   if (const char *nursery = getenv("HXCPP_FUTURE_GC_NURSERY_MB"))
-   {
-      int mb = atoi(nursery);
-      if (mb>0 && mb<4096)
-         sgFutureNurseryBudget = (size_t)mb*1024*1024;
-   }
-   #endif
-   #endif
-
    sGlobalAlloc = new GlobalAllocator();
    sgFinalizers = new FinalizerList();
    sFinalizerLock = new std::mutex();
@@ -7450,7 +7431,7 @@ void InitAlloc()
    ExitGCFreeZone();
 
    // Setup main thread ...
-   hx::thread::Thread_obj::current();
+   __hxcpp_thread_current();
 
    gMainThreadContext->onThreadAttach();
 }
@@ -7541,17 +7522,7 @@ int InternalCollect(bool inMajor,bool inCompact)
    if (!sgAllocInit)
        return 0;
 
-   #ifdef HXCPP_FUTURE_GC
-   // Give explicit collects synchronous semantics: if a concurrent cycle is
-   //  (or gets) started, wait for it to complete before returning
-   if (sgFutureCycleActive)
-      FutureGcWaitForCycle(false);
    GetLocalAlloc()->SetupStackAndCollect(inMajor, inCompact);
-   if (sgFutureCycleActive)
-      FutureGcWaitForCycle(false);
-   #else
-   GetLocalAlloc()->SetupStackAndCollect(inMajor, inCompact);
-   #endif
 
    return sGlobalAlloc->MemUsage();
 }
@@ -7597,12 +7568,6 @@ void InternalReleaseMem(void *inMem)
 {
    if (inMem)
    {
-      #ifdef HXCPP_FUTURE_GC
-      // The concurrent marker may still be looking at this memory through a
-      //  stale reference - let the remark sweep release it instead
-      if (hx::gFutureGcMarkActive)
-         return;
-      #endif
       unsigned int s = ObjectSizeSafe(inMem);
       if (s>=IMMIX_LARGE_OBJ_SIZE)
       {
@@ -7848,14 +7813,6 @@ double __hxcpp_gc_mem_info(int inWhich)
 {
    switch(inWhich)
    {
-      #ifdef HXCPP_FUTURE_GC
-      // Extended queries for the concurrent collector
-      case 100: return (double)sgFutureCycleCount;
-      case 101: return sgFutureLastRemarkMs;
-      case 102: return sgFutureMaxRemarkMs;
-      case 103: return sgFutureLastCycleMs;
-      case 104: return sgFutureCycleActive ? 1.0 : 0.0;
-      #endif
       case MEM_INFO_USAGE:
          return (double)sGlobalAlloc->MemUsage();
       case MEM_INFO_RESERVED:
@@ -7899,6 +7856,64 @@ void __hxcpp_add_member_finalizer(hx::Object *inObject, _hx_member_finalizer f, 
    std::lock_guard<std::mutex> lock(*gSpecialObjectLock);
    hx::sFinalizableList.push( hx::Finalizable(inObject, f, inPin) );
 }
+
+// --- Deferred finalizer drain ---
+// Called automatically from the allocation path (see CallAlloc) and also
+// available as an explicit API.  No Haxe-side changes required — finalizers
+// drain naturally as the program allocates.
+//
+// Returns the number of finalizers actually called.  Pass -1 or 0 to drain all.
+// Under HXCPP_GC_LINE_PROFILE, prints a summary when the queue is non-empty.
+#ifdef HXCPP_DEFER_HAXE_FINALIZERS
+int __hxcpp_run_deferred_finalizers(int inMaxCount)
+{
+   int n = GetDeferredFinalizers().size();
+   if (n == 0)
+      return 0;
+
+   int count = (inMaxCount <= 0 || inMaxCount > n) ? n : inMaxCount;
+
+   for (int i = 0; i < count; i++)
+   {
+      DeferredFinalizerEntry &df = GetDeferredFinalizers()[i];
+      // The object was resurrected during the GC pause.  Its memory is still
+      // valid.  After this call, the object is no longer in sHaxeFinalizerMap
+      // and not reachable from any root, so it will be collected on the next GC.
+      (*df.func)(df.obj);
+   }
+
+   // Compact: remove the processed entries (shift survivors to front).
+   int write = 0;
+   for (int i = count; i < n; i++)
+   {
+      if (write != i)
+         GetDeferredFinalizers()[write] = GetDeferredFinalizers()[i];
+      write++;
+   }
+   GetDeferredFinalizers().setSize(write);
+
+   #ifdef HXCPP_GC_LINE_PROFILE
+   if (count > 0)
+   {
+      fprintf(stderr, "[gc.deferred] drained %d finalizers, %d remaining (high=%d)\n",
+              count, (int)GetDeferredFinalizers().size(), GetDeferredHighWater());
+      fflush(stderr);
+   }
+   #endif
+
+   return count;
+}
+
+// Query the queue size without draining (for diagnostics / budgeting).
+int __hxcpp_deferred_finalizer_count()
+{
+   return GetDeferredFinalizers().size();
+}
+#else
+// Stubs when deferred finalizers are disabled — keeps the link symbols available.
+int __hxcpp_run_deferred_finalizers(int) { return 0; }
+int __hxcpp_deferred_finalizer_count() { return 0; }
+#endif
 
 void __hxcpp_add_alloc_finalizer(void *inAlloc, _hx_alloc_finalizer f, bool inPin)
 {
