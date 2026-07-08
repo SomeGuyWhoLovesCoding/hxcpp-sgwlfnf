@@ -5986,37 +5986,32 @@ public:
       #ifdef HXCPP_GC_GENERATIONAL
       if (generational)
       {
-         // Calculate how much of the *free* space was consumed by surviving objects
-         int freeSpace = mAllBlocks.size()*IMMIX_USEFUL_LINES - oldRowsInUse;
+         // TODO - include large too?
          int retained = mRowsInUse - oldRowsInUse;
-         
-         // Prevent division by zero or negative estimates
-         if (freeSpace < 1) freeSpace = 1;
-         if (retained < 0) retained = 0;
-         
-         mGenerationalRetainEstimate = (double)retained / (double)freeSpace;
+         int space = mAllBlocks.size()*IMMIX_USEFUL_LINES - oldRowsInUse;
+         if (space<retained)
+            space = retained;
+
+         mGenerationalRetainEstimate = (double)retained/(double)space;
       }
       else
       {
-         // Decay the estimate towards a baseline when we do a Full GC
-         mGenerationalRetainEstimate += (0.1 - mGenerationalRetainEstimate) * 0.25;
+         // move towards 0.2
+         mGenerationalRetainEstimate += (0.2-mGenerationalRetainEstimate)*0.25;
       }
 
-      double filled_ratio = (double)mRowsInUse / (double)(mAllBlocksCount * IMMIX_USEFUL_LINES);
+      double filled_ratio = (double)mRowsInUse/(double)(mAllBlocksCount*IMMIX_USEFUL_LINES);
+      double after_gen = filled_ratio + (1.0-filled_ratio)*mGenerationalRetainEstimate;
 
-      // Project how full the heap will be after the next Gen GC
-      double projected_fullness = filled_ratio + (1.0 - filled_ratio) * mGenerationalRetainEstimate;
-
-      // FIX: The original 0.75 threshold forces Full GC if your working set naturally 
-      // sits above 75% heap utilization. Raising to 0.95 allows Generational to 
-      // work even on heavily utilized heaps.
-      if (projected_fullness < 0.95)
+      if (after_gen<0.75)
       {
          sGcMode = gcmGenerational;
       }
       else
       {
          sGcMode = gcmFull;
+         // What was I thinking here?  This breaks #851
+         //gByteMarkID |= 0x30;
       }
 
       #ifdef SHOW_MEM_EVENTS
