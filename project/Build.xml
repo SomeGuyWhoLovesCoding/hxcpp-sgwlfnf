@@ -11,7 +11,7 @@
 <import name="libs/sqlite/Build.xml" />
 
 
-<haxedef name="EXPERIMENTAL_DRAIN_FINALIZER" />
+
 
 <files id="msvccompat" >
   <file name="StlLink.cpp"/>
