@@ -70,22 +70,17 @@ bool hx::thread::CountingSemaphore_obj::tryAcquire(Null<double> timeout)
 		t.tv_sec = tv.tv_sec + idelta + idelta2;
 		t.tv_nsec = (long)delta;
 
-		if (0 == sem_timedwait(&impl->semaphore, &t))
+		switch (sem_timedwait(&impl->semaphore, &t))
 		{
+		case 0:
 			hx::ExitGCFreeZone();
 			return true;
-		}
-		else
-		{
+		case ETIMEDOUT:
 			hx::ExitGCFreeZone();
-			if (errno == ETIMEDOUT)
-			{
-				return false;
-			}
-			else
-			{
-				return hx::Throw(HX_CSTRING("Failed to wait for semaphore"));
-			}
+			return false;
+		default:
+			hx::ExitGCFreeZone();
+			return hx::Throw(HX_CSTRING("Failed to wait for semaphore"));
 		}
 	}
 }

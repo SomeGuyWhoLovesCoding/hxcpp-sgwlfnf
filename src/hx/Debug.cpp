@@ -7,7 +7,6 @@
 #include <hx/Thread.h>
 #include <hx/Telemetry.h>
 #include <hx/Unordered.h>
-#include <hx/thread/Thread.hpp>
 #include <hx/OS.h>
 #include <mutex>
 
@@ -194,10 +193,6 @@ StackContext::StackContext()
    mIsUnwindingException = false;
    #endif
 
-   #ifdef HXCPP_FUTURE_GC
-   mFutureDirty = 0;
-   #endif
-
    #if HXCPP_TELEMETRY
    mTelemetry = tlmCreate(this);
    #endif
@@ -249,7 +244,7 @@ StackContext::~StackContext()
 void StackContext::onThreadAttach()
 {
    #ifdef HXCPP_STACK_IDS
-    mThreadId = hx::thread::Thread_obj::id();
+   mThreadId = __hxcpp_GetCurrentThreadNumber();
 
    {
        std::lock_guard<std::mutex> guard(sStackMapMutex);

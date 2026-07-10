@@ -414,9 +414,9 @@ inline void cpp::marshal::Marshal::writeLittleEndianUInt32(const View<uint8_t>& 
 inline void cpp::marshal::Marshal::writeLittleEndianUInt64(const View<uint8_t>& view, const uint64_t& value)
 {
 #ifdef HXCPP_BIG_ENDIAN
-    writeUInt64(view, reverse(value));
+    writeUInt16(view, reverse(value));
 #else
-    writeUInt64(view, value);
+    writeUInt16(view, value);
 #endif
 }
 
@@ -496,9 +496,9 @@ inline void cpp::marshal::Marshal::writeBigEndianUInt32(const View<uint8_t>& vie
 inline void cpp::marshal::Marshal::writeBigEndianUInt64(const View<uint8_t>& view, const uint64_t& value)
 {
 #ifndef HXCPP_BIG_ENDIAN
-    writeUInt64(view, reverse(value));
+    writeUInt16(view, reverse(value));
 #else
-    writeUInt64(view, value);
+    writeUInt16(view, value);
 #endif
 }
 
