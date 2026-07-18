@@ -1,10 +1,9 @@
 #include <hxcpp.h>
 #include <map>
 #include <vector>
+#include <hx/Thread.h>
 #include <hx/OS.h>
 #include <mutex>
-#include <thread>
-#include <chrono>
 
 
 #ifdef HX_WINRT
@@ -50,8 +49,7 @@ public:
         gThreadRefCount += 1;
 
         if (gThreadRefCount == 1) {
-            std::thread thread(ProfileMainLoop);
-            thread.detach();
+            HxCreateDetachedThread(ProfileMainLoop, 0);
         }
     }
 
@@ -216,16 +214,18 @@ private:
         int childrenPlusSelf;
     };
 
-    static void ProfileMainLoop()
+    static THREAD_FUNC_TYPE ProfileMainLoop(void *)
     {
         int millis = 1;
 
         while (gThreadRefCount > 0) { 
-            std::this_thread::sleep_for(std::chrono::milliseconds(millis));
+            HxSleep(millis);
 
             int count = gProfileClock + 1;
             gProfileClock = (count < 0) ? 0 : count;
         }
+
+        THREAD_FUNC_RET
     }
 
     String mDumpFile;

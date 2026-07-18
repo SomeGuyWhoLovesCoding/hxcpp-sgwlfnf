@@ -1418,11 +1418,8 @@ String String::fromCharCode( int c )
    else
    {
       #ifdef HX_SMART_STRINGS
-      // Leave Utf16 surrogate handling up to the application - as far as hxcpp is concerned
-      // they are single characters. ie, mirror charAt. 
-      // If the application does not group them as a pair, then it may not be possible to convert to utf8.
-      //if (IsUtf16Surrogate(c))
-      //   hx::Throw(HX_CSTRING("Invalid unpaired surrogate code"));
+      if (IsUtf16Surrogate(c)||c>=0x110000)
+         c = 0xFFFD;
       #endif
 
       int group = c>>10;
