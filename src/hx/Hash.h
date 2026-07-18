@@ -243,7 +243,7 @@ inline void CopyValue(String &outValue, Float inValue) {  }
 inline void CopyValue(String &outValue, const Dynamic &inValue) { outValue = inValue; }
 inline void CopyValue(int &outValue, int inValue) { outValue = inValue; }
 inline void CopyValue(int &outValue, cpp::Int64 inValue) { }
-inline void CopyValue(int &outValue, Float inValue) { outValue = (int)inValue; }
+inline void CopyValue(int &outValue, Float inValue) { outValue = inValue; }
 inline void CopyValue(int &outValue, const Dynamic &inValue) { outValue = inValue; }
 inline void CopyValue(int &outValue, const String &inValue) {  }
 inline void CopyValue(Float &outValue, Float inValue) { outValue = inValue; }
@@ -384,9 +384,6 @@ struct Hash : public HashBase< typename ELEMENT::Key >
       //printf("expand %d -> %d\n",bucketCount, inNewCount);
       bucket = (Element **)InternalRealloc(bucketCount*sizeof(ELEMENT *), bucket,inNewCount*sizeof(ELEMENT *));
       HX_OBJ_WB_GET(this, bucket);
-      // The relinking below moves elements without per-store barriers - a
-      //  concurrent marker scan may see a torn view, so force a remark re-scan
-      HX_OBJ_WB_FUTURE_BULK(this);
       //for(int b=bucketCount;b<inNewCount;b++)
       //   bucket[b] = 0;
 
@@ -452,7 +449,6 @@ struct Hash : public HashBase< typename ELEMENT::Key >
       bucketCount = newSize;
       bucket = (Element **)InternalRealloc(origSize*sizeof(ELEMENT *),bucket, sizeof(ELEMENT *)*bucketCount );
       HX_OBJ_WB_GET(this, bucket);
-      HX_OBJ_WB_FUTURE_BULK(this);
    }
 
    bool remove(Key inKey)
@@ -606,30 +602,15 @@ struct Hash : public HashBase< typename ELEMENT::Key >
       bucket[hash&mask] = el;
 
       #ifdef HXCPP_GC_GENERATIONAL
-      #ifdef HXCPP_FUTURE_GC
-      if (hx::gFutureGcMarkActive)
+      unsigned char &mark =  ((unsigned char *)(this))[ HX_ENDIAN_MARK_ID_BYTE];
+      if (mark == hx::gByteMarkID)
       {
-         // Concurrent cycle running - make sure the new element, its key and
-         //  its value are all shaded (marked + queued for scanning)
-         hx::StackContext *_hx_fctx = HX_CTX_GET;
-         HX_FUTURE_GC_SHADE_CTX(el,_hx_fctx);
-         HX_FUTURE_GC_SHADE_CTX(hx::PointerOf(el->key),_hx_fctx);
-         if (hx::ContainsPointers<Value>())
-            HX_FUTURE_GC_SHADE_CTX(hx::PointerOf(el->value),_hx_fctx);
-      }
-      else
-      #endif
-      {
-         unsigned char &mark =  ((unsigned char *)(this))[ HX_ENDIAN_MARK_ID_BYTE];
-         if (mark == hx::gByteMarkID)
+         // Look for nursery objects...
+         if ( IsNursery(el) || IsNursery(hx::PointerOf(el->key)) ||
+             (hx::ContainsPointers<Value>() && IsNursery(hx::PointerOf(el->value)) ) )
          {
-            // Look for nursery objects...
-            if ( IsNursery(el) || IsNursery(hx::PointerOf(el->key)) ||
-                (hx::ContainsPointers<Value>() && IsNursery(hx::PointerOf(el->value)) ) )
-            {
-               mark|=HX_GC_REMEMBERED;
-               (HX_CTX_GET)->pushReferrer(this);
-            }
+            mark|=HX_GC_REMEMBERED;
+            (HX_CTX_GET)->pushReferrer(this);
          }
       }
       #endif
@@ -816,39 +797,6 @@ struct Hash : public HashBase< typename ELEMENT::Key >
       HX_MARK_ARRAY(bucket);
 
       HashMarker marker(__inCtx);
-
-      #ifdef HXCPP_FUTURE_GC
-      if (hx::gFutureGcMarkActive)
-      {
-         // Concurrent scan may race hash mutation.  Inserts shade their
-         //  element/key/value and re-bucketing queues the hash for a remark
-         //  re-scan, so a bounded, torn view here is still sound - the bounds
-         //  just protect against overruns and looping on torn chains.
-         Element **b = bucket;
-         if (!b)
-            return;
-         int nBuckets = bucketCount;
-         unsigned int header = ((unsigned int *)b)[-1];
-         if (!(header & HX_GC_CONST_ALLOC_BIT))
-         {
-            int maxBuckets = (int)(hx::ObjectSizeSafe((void *)b)/sizeof(Element *));
-            if (nBuckets>maxBuckets)
-               nBuckets = maxBuckets;
-         }
-         int guard = size*2 + nBuckets + 4096;
-         for(int i=0;i<nBuckets && guard>0;i++)
-         {
-            Element *el = b[i];
-            while(el && guard-->0)
-            {
-               marker(el);
-               el = el->next;
-            }
-         }
-         return;
-      }
-      #endif
-
       iterate(marker);
    }
 

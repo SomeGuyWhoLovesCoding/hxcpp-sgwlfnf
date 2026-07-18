@@ -1,14 +1,19 @@
 {
-  "name": "hxcpp",
-  "url": "https://github.com/HaxeFoundation/hxcpp/",
-  "license": "BSD",
-  "tags": ["haxe", "hxcpp", "cpp"],
-  "description": "Hxcpp is the runtime support for the C++ backend of the Haxe compiler. This contains the headers, libraries and support code required to generate a fully compiled executable from Haxe code.",
-  "version": "4.3.0",
-  "releasenote": "See Changes.md",
-  "contributors": ["gamehaxe", "HaxeFoundation"],
-  "binaryversion": 48,
-  "dependencies": {
-
-  }
+	"name": "hxcpp",
+	"description": "Hxcpp is the runtime support for the C++ backend of the Haxe compiler. This contains the headers, libraries and support code required to generate a fully compiled executable from Haxe code.",
+	"binaryversion": 48,
+	"dependencies": {},
+	"url": "https://github.com/HaxeFoundation/hxcpp/",
+	"contributors": [
+		"gamehaxe",
+		"HaxeFoundation"
+	],
+	"version": "4.3.131",
+	"releasenote": "See Changes.md",
+	"tags": [
+		"haxe",
+		"hxcpp",
+		"cpp"
+	],
+	"license": "BSD"
 }
